@@ -4,31 +4,57 @@ export default {
     
     if (request.method === "POST" && url.pathname === "/webhook") {
       const body = await request.json();
+      const chatId = body.message ? body.message.chat.id : (body.callback_query ? body.callback_query.message.chat.id : null);
       
       // 1. Yeni Konu Gelirse
       if (body.message && body.message.text && body.message.text.startsWith("/yeni")) {
         const topic = body.message.text.replace("/yeni", "").trim();
         
-        const geminiRes = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + env.GEMINI_KEY, {
+        // Hemen cevap ver
+        await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: `Konu: ${topic}. Kısa dikey video senaryosu yaz. SADECE JSON dön: {"baslik":"...", "senaryo":"...", "gorseller":["terim 1", "terim 2"]}` }] }] })
+          body: JSON.stringify({ chat_id: chatId, text: `✍️ Konu alındı: ${topic}\nSenaryo yazılıyor...` })
         });
-        const geminiData = await geminiRes.json();
-        
-        if(geminiData.candidates) {
-            const text = geminiData.candidates[0].content.parts[0].text;
-            const data = JSON.parse(text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1));
-            
-            await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                chat_id: body.message.chat.id,
-                text: `📋 SENARYO:\n\n${data.senaryo}\n\nOnaylıyor musunuz?`,
-                reply_markup: { inline_keyboard: [[{ text: "✅ Onayla", callback_data: `onayla:${JSON.stringify(data)}` }]] }
-              })
-            });
+
+        try {
+          // Güncel ve stabil model (v1)
+          const apiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_KEY}`;
+          const geminiRes = await fetch(apiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: `Konu: ${topic}. Kısa dikey video senaryosu yaz. SADECE JSON dön: {"baslik":"...", "senaryo":"...", "gorseller":["terim 1", "terim 2"]}` }] }] })
+          });
+          
+          const geminiData = await geminiRes.json();
+          
+          if (geminiData.error) {
+              throw new Error(`API Hatası: ${geminiData.error.message}`);
+          }
+          
+          if(geminiData.candidates) {
+              const text = geminiData.candidates[0].content.parts[0].text;
+              const data = JSON.parse(text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1));
+              
+              await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  chat_id: chatId,
+                  text: `📋 SENARYO:\n\n${data.senaryo}\n\nOnaylıyor musunuz?`,
+                  reply_markup: { inline_keyboard: [[{ text: "✅ Onayla", callback_data: `onayla:${JSON.stringify(data)}` }]] }
+                })
+              });
+          } else {
+              throw new Error("Geçersiz yanıt formatı.");
+          }
+        } catch (err) {
+          // Hata olursa Telegram'a hatayı yaz
+          await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: chatId, text: `❌ Hata: ${err.message}` })
+          });
         }
       }
       
