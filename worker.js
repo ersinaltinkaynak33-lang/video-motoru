@@ -18,17 +18,17 @@ export default {
         });
 
         try {
-          // GROQ API (Llama 3 70B) Kullanımı
+          // GROQ API (Güncel model: openai/gpt-oss-120b)
           const apiUrl = "https://api.groq.com/openai/v1/chat/completions";
           
           const groqRes = await fetch(apiUrl, {
             method: "POST",
             headers: { 
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${env.GROQ_API_KEY}` // Cloudflare'deki Groq anahtarını kullanır
+              "Authorization": `Bearer ${env.GROQ_API_KEY}`
             },
             body: JSON.stringify({ 
-              model: "llama3-70b-8192", // Groq'un en stabil ve güncel modellerinden biri
+              model: "openai/gpt-oss-120b", // Groq'un resmi yedek modeli
               messages: [
                 { role: "system", content: "Sen kısa dikey videolar için senaryo yazan bir yazarsın. SADECE geçerli bir JSON döndür. Başka hiçbir metin yazma. JSON formatı şu şekilde olmalı: {\"baslik\":\"...\", \"senaryo\":\"...\", \"gorseller\":[\"terim 1\", \"terim 2\"]}" },
                 { role: "user", content: `Konu: ${topic}. Kısa dikey video senaryosu yaz.` }
@@ -39,20 +39,17 @@ export default {
           
           const groqData = await groqRes.json();
           
-          // API'den gelen hatayı kontrol et
           if (groqData.error) {
               throw new Error(groqData.error.message);
           }
           
           if (groqData.choices && groqData.choices[0].message.content) {
-              // Modelin döndürdüğü metni temizle (bazen ```json ... ``` şeklinde dönebilir)
+              // Modelin döndürdüğü metni temizle (```json ... ``` etiketlerini kaldır)
               let text = groqData.choices[0].message.content;
               text = text.replace(/```json/g, "").replace(/```/g, "").trim();
               
-              // Gelen metni JSON olarak ayrıştır
               const data = JSON.parse(text); 
               
-              // Senaryoyu ve onay butonunu gönder
               await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -66,7 +63,6 @@ export default {
               throw new Error("Groq API geçerli bir yanıt vermedi.");
           }
         } catch (err) {
-          // Hata olursa doğrudan Telegram'a yaz
           await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -81,7 +77,6 @@ export default {
           const data = JSON.parse(body.callback_query.data.replace("onayla:", ""));
           const payload = { video_subject: data.baslik, video_script: data.senaryo, video_terms: data.gorseller };
           
-          // GitHub Actions'ı tetikle
           await fetch(`https://api.github.com/repos/${env.GITHUB_USER}/${env.GITHUB_REPO}/actions/workflows/video-uret.yml/dispatches`, {
             method: "POST",
             headers: { 
@@ -92,7 +87,6 @@ export default {
             body: JSON.stringify({ ref: "main", inputs: { payload: JSON.stringify(payload) } })
           });
           
-          // Telegram'a onay bildirimi gönder
           await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/answerCallbackQuery`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
