@@ -23,14 +23,17 @@ RENDER_DEADLINE_S = 15 * 60
 # Worker ne gönderirse göndersin bunlar burada zorlanır.
 # State değerleri MPT const.py'den: COMPLETE=1, FAILED=-1, PROCESSING=4
 DEFAULTS = {
-    "video_source": "pixabay",
+    "video_source": "pixabay",       # (Pexels'e geçmek istersen "pexels" yapıp API key eklemelisin)
     "voice_name": "tr-TR-EmelNeural-Female",
     "video_aspect": "9:16",
     "video_count": 1,
-    "video_clip_duration": 4,
+    "video_clip_duration": 2,        # 2 saniyelik hızlı kesimler
     "subtitle_enabled": True,
-    # Varsayılan STHeitiMedium Türkçe karakterlerde (ş, ğ, İ) tofu verebilir; test et.
-    "font_name": "MicrosoftYaHeiBold.ttc",
+    "subtitle_position": "custom",   # Altyazıyı TikTok UI'ının üstüne çek
+    "custom_position": 66.0,         # Yukarıdan %66 (gözle test edilecek)
+    "voice_rate": 1.1,               # Ses hızını 1.1'e çıkar (daha dinamik)
+    "bgm_volume": 0.12,              # Arka plan müziği sesi (konuşmayı ezmesin)
+    "font_name": "MicrosoftYaHeiBold.ttc", # Türkçe karakter desteği
 }
 
 
@@ -74,6 +77,18 @@ def probe(path):
     j = json.loads(out)
     s = j["streams"][0]
     return int(s["width"]), int(s["height"]), float(j["format"]["duration"])
+
+
+def normalize(src):
+    """Ses seviyesini kısa video platformlarının yaygın hedefi olan ~-14 LUFS'a çek."""
+    dst = src.replace(".mp4", "-ln.mp4")
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", src,
+         "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", dst],
+        check=True,
+    )
+    return dst
 
 
 def shrink(src):
@@ -121,8 +136,12 @@ def main():
         files = sorted(glob.glob(f"storage/tasks/{task_id}/final-*.mp4"))  # küçük harf 'storage'
         if not files:
             raise FileNotFoundError("final-*.mp4 bulunamadı")
-        path = files[0]
+        
+        # 1. SES NORMALİZASYONU (TikTok Standardı -14 LUFS)
+        print("Ses normalize ediliyor...")
+        path = normalize(files[0])
 
+        # 2. BOYUT KONTROLÜ VE SIKIŞTIRMA
         if os.path.getsize(path) > MAX_BYTES:
             print("Dosya büyük, sıkıştırılıyor:", os.path.getsize(path))
             path = shrink(path)
