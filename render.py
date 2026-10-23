@@ -1,4 +1,4 @@
-"""MoneyPrinterTurbo Sürücüsü - Nihai Cerrahi Müdahale (v2)"""
+"""MoneyPrinterTurbo Sürücüsü - Nihai Cerrahi Müdahale (v3)"""
 import os, sys, json, time, glob, subprocess, asyncio, urllib.parse, requests
 import edge_tts
 
@@ -11,6 +11,7 @@ RENDER_DEADLINE_S = 15 * 60
 
 async def generate_audio_and_ass(text, voice, mp3_path, ass_path):
     print("Ses ve ASS Altyazı üretiliyor...")
+    # MPT kendi sesini üretecek, biz sadece zamanlamayı almak için buradayız
     communicate = edge_tts.Communicate(text, voice, rate="+10%")
     words = []
     sentence_boundaries = []
@@ -75,7 +76,6 @@ def download_materials(sahneler):
         kaynak = sahne["kaynak"]
         url = ""
         
-        # Pixabay'den arama
         if PIXABAY_KEY:
             api = f"https://pixabay.com/api/videos/?key={PIXABAY_KEY}&q={q}&per_page=5&min_width=720"
             try:
@@ -133,6 +133,7 @@ def main():
 
     audio_path = "audio.mp3"
     ass_path = "subtitles.ass"
+    # Sadece ASS üretmek için çalışıyor, ses dosyasını MPT'ye vermeyeceğiz
     asyncio.run(generate_audio_and_ass(senaryo, "tr-TR-EmelNeural", audio_path, ass_path))
 
     material_paths = download_materials(sahneler)
@@ -145,20 +146,20 @@ def main():
 
     server = start_server()
     try:
-        # GÜNCELLEME BURADA: video_materials artık sözlük listesi
         formatted_materials = [{"type": "video", "path": os.path.abspath(p)} for p in material_paths]
         
+        # DÜZELTME: custom_audio_file kaldırıldı. MPT kendi sesini üretecek.
         mpt_payload = {
             "video_subject": baslik,
             "video_script": senaryo,
             "video_source": "local",
-            "video_materials": formatted_materials, # DÜZELTİLDİ
-            "custom_audio_file": os.path.abspath(audio_path),
+            "video_materials": formatted_materials, 
             "subtitle_enabled": False,
             "video_aspect": "9:16",
             "video_clip_duration": 2,
             "video_concat_mode": "sequential",
-            "voice_name": "tr-TR-EmelNeural"
+            "voice_name": "tr-TR-EmelNeural",
+            "voice_rate": 1.1  # Bizim TTS hızımızla eşleşmesi için
         }
         
         print("MPT'ye video isteği gönderiliyor...")
