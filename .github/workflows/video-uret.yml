@@ -1,64 +1,60 @@
 name: Video Uretimi
+
 on:
   workflow_dispatch:
     inputs:
       payload:
-        description: 'Video verileri'
+        description: 'Video verileri (JSON)'
         required: true
 
+# Aynı anda 1 çalışan + en fazla 1 bekleyen iş. Fazlası iptal edilir (ucuz bir hız sınırı).
+concurrency:
+  group: video-uret
+  cancel-in-progress: false
+
+env:
+  # Tag/branch değil, commit SHA'sına sabitle: upstream kırılırsa gece yarısı bot ölmesin.
+  MPT_REF: f063a2b95e0f71f60891ac1c7b53add684bc6a46
+
 jobs:
-  build-and-render:
+  render:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 25   # 360 değil! Takılan iş 6 saat dakika yakmasın.
     steps:
+      - uses: actions/checkout@v4          # render.py bu repoda
+
       - uses: actions/checkout@v4
+        with:
+          repository: harry0703/MoneyPrinterTurbo
+          ref: ${{ env.MPT_REF }}
+          path: mpt
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          
-      - name: Sistem Bağımlılıklarını Kur
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: mpt/requirements.txt
+
+      - name: Bağımlılıklar (cache'li)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
-          
-      - name: MoneyPrinterTurbo İndir ve Kur
-        run: |
-          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git
-          cd MoneyPrinterTurbo
-          pip install -r requirements.txt
-          echo "[app]" > config.toml
-          echo "video_source = \"pixabay\"" >> config.toml
-          echo "pixabay_api_keys = [\"${{ secrets.PIXABAY_API_KEY }}\"]" >> config.toml
-          echo "video_materials = [\"video\"]" >> config.toml
-          echo "subtitle_provider = \"edge\"" >> config.toml
-          
-      - name: Videoyu Render Et ve Telegram'a Gönder
+          command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+          pip install -r mpt/requirements.txt
+
+      - name: Render + Telegram
+        working-directory: mpt
         env:
           PAYLOAD: ${{ github.event.inputs.payload }}
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.ALLOWED_CHAT_ID }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+        run: python ../render.py
+
+      - name: Çökme/zaman aşımı bildirimi
+        if: failure() || cancelled()
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.ALLOWED_CHAT_ID }}
         run: |
-          cd MoneyPrinterTurbo
-          python -c "
-          import requests, json, time, os
-          payload = json.loads(os.environ['PAYLOAD'])
-          
-          import subprocess
-          subprocess.Popen(['uvicorn', 'app.asgi:app', '--host', '0.0.0.0', '--port', '8081'])
-          time.sleep(10)
-          
-          r = requests.post('http://127.0.0.1:8081/api/v1/videos', json=payload)
-          task_id = r.json()['data']['task_id']
-          
-          while True:
-              time.sleep(10)
-              tr = requests.get(f'http://127.0.0.1:8081/api/v1/tasks/{task_id}').json()
-              if tr['data']['state'] == 'completed':
-                  v_path = f'Storage/tasks/{task_id}/final-1.mp4'
-                  with open(v_path, 'rb') as v:
-                      requests.post(f'https://api.telegram.org/bot{os.environ[\"TG_TOKEN\"]}/sendVideo', data={'chat_id': os.environ['CHAT_ID'], 'caption': payload['video_subject']}, files={'video': v})
-                  break
-              elif tr['data']['state'] == 'failed':
-                  requests.post(f'https://api.telegram.org/bot{os.environ[\"TG_TOKEN\"]}/sendMessage', json={'chat_id': os.environ['CHAT_ID'], 'text': '❌ Video üretimi başarısız oldu.'})
-                  break
-          "
+          curl -s "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            -d text="❌ Video işi çöktü veya iptal oldu: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
