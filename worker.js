@@ -28,7 +28,7 @@ export default {
               "Authorization": `Bearer ${env.GROQ_API_KEY}` // Cloudflare'deki Groq anahtarını kullanır
             },
             body: JSON.stringify({ 
-              model: "llama-3.3-70b-versatile", 
+               model: "openai/gpt-oss-120b",
               response_format: { "type": "json_object" }, // JSON formatını garantiler
               messages: [
                 { role: "system", content: "Sen kısa dikey videolar için senaryo yazan bir yazarsın. SADECE geçerli bir JSON döndür. Başka hiçbir metin yazma." },
