@@ -18,16 +18,19 @@ const tg = (env, method, payload) =>
 
 const SYSTEM_PROMPT = `Sen Türkiye'deki TikTok/Reels/Shorts için konuşma metni yazan, iddialı ama dürüst bir kısa video yazarısın.
 SADECE geçerli JSON döndür. Şema (tam ${N_SCENES} eleman):
-{"baslik":"...","cumleler":[{"metin":"...","query":"..."}]}
+{"baslik":"...","cumleler":[{"metin":"...","query":"...","avoid":["..."]}]}
 
 Her eleman bir cümle ve o cümle okunurken ekranda görünecek sahneyi temsil eder.
 
 KURALLAR:
 1. "metin": SADECE seslendirmede okunacak tek bir cümle. Zaman damgası, "Sahne", "Kesit", parantez, tırnak işareti, hashtag, emoji, CTA/logo/kamera tarifi YASAK.
-2. İlk cümle (kanca) en fazla 8 kelime: merak, çelişki veya net bir iddia. "Merhaba", "Bugün", "Biliyor muydunuz", "dünyayı değiştiren" gibi girişler YASAK.
-3. Toplam 80-100 kelime. Her cümle en fazla 12 kelime. Cümle uzunluklarını değiştir. Son cümle güçlü bir kapanış olsun.
-4. DOĞRULUK: Emin olmadığın hiçbir rakam, yıl, şirket olayı, ürün özelliği veya isim UYDURMA. Somutluğu herkesin bildiği kalıcı gerçeklerle, karşılaştırmalarla ve gündelik anlarla sağla. Şüphen varsa rakam verme, niteleyici kullan.
-5. "query": İNGİLİZCE, 2-3 kelime, kameraya çekilebilir SOMUT nesne+eylem (örn. "person typing laptop", "robot arm factory"). Marka, ürün, kişi adı ve soyut kelime (future, technology, ai, concept, innovation) YASAK. Her sahnenin query'si farklı olsun ve o cümlenin anlattığı şeyi göstersin.`;
+2. KANCA (ilk cümle, en fazla 8 kelime): somut bir sahne, çelişki veya beklenmedik bir iddia olmalı. "X ... değiştirecek/dönüştürecek/şekillendirecek" gibi ansiklopedi girişleri, "Merhaba", "Bugün", "Biliyor muydunuz" YASAK.
+3. KONU DARLIĞI: Konu geniş ise (yapay zekâ, gelecek, teknoloji) TEK bir dar açı veya tek bir hikâye seç ve onu anlat. Sektör sektör gezen katalog/liste YASAK; videonun baştan sona tek bir ana fikri olsun.
+4. Toplam 80-100 kelime. Her cümle en fazla 12 kelime, uzunlukları değiştir. Son cümle güçlü bir kapanış olsun.
+5. DOĞRULUK: Emin olmadığın hiçbir rakam, yıl, şirket olayı, ürün özelliği veya isim UYDURMA. Şüphen varsa rakam verme.
+6. "query": İngilizce, 2-4 kelime, stok video sitesinde aranacak, kameraya çekilebilir SOMUT nesne+eylem+ortam. Marka/kişi adı ve soyut kelime (future, technology, ai, concept, innovation) YASAK. Her query farklı olsun.
+7. EŞSESLİLİK KONTROLÜ: Her query için kendine sor: "Stok video sitesi bu kelimeyi başka hangi anlamda anlayabilir?" Birden fazla anlamı olan kelimeyi (örn. tablet=hap, market=pazar yeri, trader=sokak satıcısı, mouse=fare hayvanı, bank=nehir kıyısı, cell=hapishane hücresi, chip=cips, crane=turna kuşu, cloud=bulut) ya bağlam kelimesiyle netleştir ("doctor digital screen", "stock exchange trading floor") ya da hiç kullanma.
+8. "avoid": Her sahne için, yanlış anlamı gösterecek 2-5 İNGİLİZCE tek kelime (küçük harf). Örn. query "doctor digital screen" için ["pill","capsule","medicine","effervescent"]. Bu kelimeler etiketlerinde geçen videolar elenecek.`;
 
 function dogrula(d) {
   const err = [];
@@ -39,12 +42,17 @@ function dogrula(d) {
     const q = typeof x?.query === "string" ? x.query.trim() : "";
     if (!m) err.push(`${i + 1}. metin boş`);
     if (/[()\[\]"“”#]|sahne\s*\d|kesit/i.test(m)) err.push(`${i + 1}. metinde yasak karakter/ifade var`);
-    if (!/^[A-Za-z]+( [A-Za-z]+){1,2}$/.test(q)) err.push(`${i + 1}. query İngilizce 2-3 kelime olmalı`);
+    if (!/^[A-Za-z]+( [A-Za-z]+){1,3}$/.test(q)) err.push(`${i + 1}. query İngilizce 2-4 kelime olmalı`);
+    const av = x?.avoid;
+    if (!Array.isArray(av) || av.length < 2 || av.length > 6 || !av.every((w) => typeof w === "string" && /^[a-z]+$/.test(w)))
+      err.push(`${i + 1}. avoid 2-5 küçük harfli İngilizce kelime olmalı`);
   });
   const wc = c.map((x) => String(x?.metin || "").trim().split(/\s+/).filter(Boolean).length);
   const toplam = wc.reduce((a, b) => a + b, 0);
   if (c.length && (toplam < 65 || toplam > 115)) err.push(`toplam ${toplam} kelime (80-100 olmalı)`);
   if (wc[0] > 10) err.push("ilk cümle 8 kelimeyi aşıyor");
+  if (/(değiştirecek|dönüştürecek|şekillendirecek|şekillenecek)/i.test(String(c[0]?.metin || "")))
+    err.push("kanca ansiklopedi kalıbında (değiştirecek/dönüştürecek)");
   return err;
 }
 
@@ -96,7 +104,7 @@ async function senaryoUret(env, topic) {
 async function yeniSenaryo(env, chatId, topic) {
   try {
     const d = await senaryoUret(env, topic);
-    const scenes = d.cumleler.map((x) => ({ text: x.metin.trim(), query: x.query.trim() }));
+    const scenes = d.cumleler.map((x) => ({ text: x.metin.trim(), query: x.query.trim(), avoid: x.avoid }));
     const id = crypto.randomUUID().slice(0, 8);
     await env.KV.put(`s:${id}`, JSON.stringify({ baslik: d.baslik.trim(), scenes }), { expirationTtl: 3600 });
 
