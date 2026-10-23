@@ -17,7 +17,7 @@ KURALLAR:
 5. "sahneler": tam 10 adet. Her sahne için "query" KESİNLİKLE İNGİLİZCE, 2 kelime ve SOMUT NESNELER/EYLEMLER olmalı (örn. "person typing laptop", "robot arm factory"). Soyut kelimeler (future, technology, ai, cross, god) YASAK.
 6. "kaynak": Eğer sahne çok modern, sinematik bir teknolojiyi anlatıyorsa "coverr", genel bir nesne veya gündelik bir eylemse "pixabay" seç.`;
 
-async function yeniSenaryo(env, chatId, topic) {
+async function groqCagir(env, messages, retry = 1) {
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
@@ -28,20 +28,54 @@ async function yeniSenaryo(env, chatId, topic) {
       body: JSON.stringify({
         model: "openai/gpt-oss-120b",
         temperature: 0.7,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `Konu: ${topic}` },
-        ],
+        response_format: { type: "json_object" }, // JSON garantisi
+        messages: messages,
       }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(20000),
     });
+    
+    if (!res.ok) {
+      throw new Error(`API HTTP Hatası: ${res.status}`);
+    }
     
     const j = await res.json();
     if (j.error) throw new Error(j.error.message);
     
     let text = j.choices[0].message.content;
+    if (!text || text.trim() === "") {
+      throw new Error("Yapay zeka boş yanıt döndürdü.");
+    }
+
+    // Markdown etiketlerini temizle
     text = text.replace(/```json/g, "").replace(/```/g, "").trim();
-    const data = JSON.parse(text);
+    
+    // Güvenli JSON ayrıştırma
+    return JSON.parse(text);
+    
+  } catch (err) {
+    if (retry > 0) {
+      console.log("Groq Hatası, tekrar deneniyor...", err.message);
+      await new Promise(r => setTimeout(r, 2000)); // 2 saniye bekle
+      return groqCagir(env, messages, retry - 1);
+    }
+    throw err;
+  }
+}
+
+async function yeniSenaryo(env, chatId, topic) {
+  try {
+    const messages = [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: `Konu: ${topic}` },
+    ];
+
+    // Groq'ya gönder ve JSON al
+    const data = await groqCagir(env, messages, 2); // 2 kez deneme hakkı
+
+    // Gelen verinin doğruluğunu kontrol et
+    if (!data.baslik || !data.senaryo || !Array.isArray(data.sahneler)) {
+      throw new Error("Yapay zeka geçerli bir formatta yanıt vermedi.");
+    }
 
     const id = crypto.randomUUID().slice(0, 8);
     await env.KV.put(`s:${id}`, JSON.stringify(data), { expirationTtl: 3600 });
@@ -52,6 +86,7 @@ async function yeniSenaryo(env, chatId, topic) {
       reply_markup: { inline_keyboard: [[{ text: "✅ Onayla", callback_data: `onayla:${id}` }]] },
     });
   } catch (err) {
+    console.error("Senaryo Hatası:", err);
     await tg(env, "sendMessage", { chat_id: chatId, text: `❌ Hata: ${err.message}` });
   }
 }
@@ -67,7 +102,6 @@ async function onayla(env, cq) {
   await env.KV.delete(`s:${id}`);
   const d = JSON.parse(raw);
   
-  // Render.py'ye sahneleri ve seçilen kaynakları gönderiyoruz
   const payload = { video_subject: d.baslik, video_script: d.senaryo, sahneler: d.sahneler };
 
   const gh = await fetch(
