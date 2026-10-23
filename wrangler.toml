@@ -5,6 +5,7 @@ compatibility_date = "2024-10-23"
 [vars]
 GITHUB_USER = "ersinaltinkaynak33-lang"
 GITHUB_REPO = "video-motoru"
+ALLOWED_USER_ID = "8533035966"
 
 [[kv_namespaces]]
 binding = "KV"
