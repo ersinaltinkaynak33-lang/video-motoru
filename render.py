@@ -1,174 +1,180 @@
-"""MoneyPrinterTurbo sürücüsü: payload -> video -> (gerekirse sıkıştır) -> Telegram.
-
-Cwd: MPT repo kökü (workflow `working-directory: mpt` ile çalıştırır).
-Gerekli env: PAYLOAD, TG_TOKEN, CHAT_ID, PIXABAY_API_KEY
-"""
-import glob
-import json
-import os
-import subprocess
-import sys
-import time
-
-import requests
+"""MoneyPrinterTurbo Sürücüsü - 4 Madde Entegre (Ses, Görsel, ASS, Kaynak)"""
+import os, sys, json, time, glob, subprocess, asyncio, urllib.parse, requests
+import edge_tts
 
 API = "http://127.0.0.1:8081/api/v1"
 TG = f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}"
 CHAT_ID = os.environ["CHAT_ID"]
-
-# Telegram Bot API sınırı 50 MB; güvenlik payı bırak.
+PIXABAY_KEY = os.environ.get("PIXABAY_API_KEY", "")
 MAX_BYTES = 47 * 1024 * 1024
 RENDER_DEADLINE_S = 15 * 60
 
-# Worker ne gönderirse göndersin bunlar burada zorlanır.
-# State değerleri MPT const.py'den: COMPLETE=1, FAILED=-1, PROCESSING=4
-DEFAULTS = {
-    "video_source": "pixabay",       # (Pexels'e geçmek istersen "pexels" yapıp API key eklemelisin)
-    "voice_name": "tr-TR-EmelNeural-Female",
-    "video_aspect": "9:16",
-    "video_count": 1,
-    "video_clip_duration": 2,        # 2 saniyelik hızlı kesimler
-    "subtitle_enabled": True,
-    "subtitle_position": "custom",   # Altyazıyı TikTok UI'ının üstüne çek
-    "custom_position": 66.0,         # Yukarıdan %66 (gözle test edilecek)
-    "voice_rate": 1.1,               # Ses hızını 1.1'e çıkar (daha dinamik)
-    "bgm_volume": 0.12,              # Arka plan müziği sesi (konuşmayı ezmesin)
-    "font_name": "MicrosoftYaHeiBold.ttc", # Türkçe karakter desteği
-}
+async def generate_audio_and_ass(text, voice, mp3_path, ass_path):
+    print("Ses ve ASS Altyazı üretiliyor...")
+    communicate = edge_tts.Communicate(text, voice, rate="+10%")
+    words = []
+    with open(mp3_path, "wb") as f:
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                f.write(chunk["data"])
+            elif chunk["type"] == "WordBoundary":
+                words.append({
+                    "word": chunk["text"],
+                    "start": chunk["offset"] / 10000000,
+                    "duration": chunk["duration"] / 10000000
+                })
+    
+    # ASS Formatı (Hormozi Tarzı - Kelime Kelime Vurgulu)
+    header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 1
+ScaledBorderAndShadow: yes
 
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial Black,100,&H00FFFF&,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,3,2,10,10,400,1
 
-def notify(text):
-    try:
-        requests.post(f"{TG}/sendMessage", json={"chat_id": CHAT_ID, "text": text[:4000]}, timeout=30)
-    except Exception as e:  # bildirim hatası işi düşürmesin
-        print("notify failed:", e)
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(header)
+        for i, w in enumerate(words):
+            start = w["start"]
+            end = start + w["duration"]
+            # Zamanı ASS formatına çevir (H:MM:SS.cs)
+            def fmt(t): return f"{int(t//3600)}:{int((t%3600)//60):02d}:{int(t%60):02d}.{int((t%1)*100):02d}"
+            # Kelimeye pop-in efekti ekle
+            text_escaped = w["word"].replace("{", "\\{").replace("}", "\\}")
+            f.write(f"Dialogue: 0,{fmt(start)},{fmt(end)},Default,,0,0,0,,{{\\fscx120\\fscy120\\t(0,100,\\fscx100\\fscy100)}}{text_escaped}\n")
+    print(f"Altyazı kaydedildi: {len(words)} kelime")
 
+def download_materials(sahneler):
+    print("Çoklu kaynaktan görseller indiriliyor...")
+    os.makedirs("local_materials", exist_ok=True)
+    paths = []
+    for i, sahne in enumerate(sahneler):
+        q = urllib.parse.quote(sahne["query"])
+        kaynak = sahne["kaynak"]
+        url = ""
+        
+        if kaynak == "pixabay" and PIXABAY_KEY:
+            # Pixabay araması
+            api = f"https://pixabay.com/api/videos/?key={PIXABAY_KEY}&q={q}&per_page=5&min_width=720"
+            r = requests.get(api, timeout=10).json()
+            if r.get("hits"):
+                url = r["hits"][0]["videos"]["medium"]["url"]
+        else:
+            # Coverr veya Pixabay yoksa Wikimedia'dan dene
+            url = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={q}+filetype:video&gsrlimit=1&prop=imageinfo&iiprop=url&format=json"
+            r = requests.get(url, timeout=10, headers={"User-Agent": "Bot/1.0"}).json()
+            try:
+                pages = r["query"]["pages"]
+                for p in pages:
+                    url = pages[p]["imageinfo"][0]["url"]
+            except: pass
 
-def write_config():
-    key = os.environ["PIXABAY_API_KEY"]
-    with open("config.toml", "w", encoding="utf-8") as f:
-        f.write("[app]\n")
-        f.write('video_source = "pixabay"\n')
-        f.write(f"pixabay_api_keys = [{json.dumps(key)}]\n")
-        f.write('subtitle_provider = "edge"\n')
-
+        if url:
+            v_path = f"local_materials/sahne_{i}.mp4"
+            try:
+                vid = requests.get(url, timeout=15)
+                with open(v_path, "wb") as f: f.write(vid.content)
+                paths.append(v_path)
+                print(f"Sahne {i+1} indirildi: {kaynak}")
+            except: print(f"Sahne {i+1} indirilemedi.")
+        else:
+            print(f"Sahne {i+1} için video bulunamadı, atlanıyor.")
+    
+    return paths
 
 def start_server():
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.asgi:app", "--host", "127.0.0.1", "--port", "8081"]
-    )
+    proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.asgi:app", "--host", "127.0.0.1", "--port", "8081"])
     for _ in range(60):
         try:
-            if requests.get(f"{API}/tasks", timeout=2).status_code == 200:
-                return proc
-        except requests.RequestException:
-            pass
+            if requests.get(f"{API}/tasks", timeout=2).status_code == 200: return proc
+        except: pass
         time.sleep(1)
     proc.kill()
-    raise RuntimeError("MPT sunucusu 60 sn içinde ayağa kalkmadı")
-
-
-def probe(path):
-    out = subprocess.check_output(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height:format=duration",
-         "-of", "json", path]
-    )
-    j = json.loads(out)
-    s = j["streams"][0]
-    return int(s["width"]), int(s["height"]), float(j["format"]["duration"])
-
+    raise RuntimeError("MPT başlamadı")
 
 def normalize(src):
-    """Ses seviyesini kısa video platformlarının yaygın hedefi olan ~-14 LUFS'a çek."""
     dst = src.replace(".mp4", "-ln.mp4")
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", src,
-         "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
-         "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", dst],
-        check=True,
-    )
+    subprocess.run(["ffmpeg", "-y", "-i", src, "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", dst], check=True)
     return dst
 
-
-def shrink(src):
-    """Hedef bitrate hesabıyla 47 MB altına in."""
-    _, _, dur = probe(src)
-    total_kbps = int(MAX_BYTES * 8 / dur / 1000 * 0.92)
-    v_kbps = max(total_kbps - 128, 300)
-    dst = src.replace(".mp4", "-small.mp4")
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", src,
-         "-c:v", "libx264", "-preset", "veryfast",
-         "-b:v", f"{v_kbps}k", "-maxrate", f"{int(v_kbps * 1.2)}k", "-bufsize", f"{v_kbps * 2}k",
-         "-vf", "scale=720:-2", "-c:a", "aac", "-b:a", "128k",
-         "-movflags", "+faststart", dst],
-        check=True,
-    )
+def burn_subtitles(src, ass):
+    dst = src.replace(".mp4", "-final.mp4")
+    # ASS dosyasını videoya göm
+    subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", f"ass={ass}:fontsdir=assets/fonts", "-c:a", "copy", dst], check=True)
     return dst
-
 
 def main():
-    payload = {**DEFAULTS, **json.loads(os.environ["PAYLOAD"])}
-    payload.setdefault("video_subject", "video")
-    write_config()
+    payload = json.loads(os.environ["PAYLOAD"])
+    sahneler = payload.get("sahneler", [])
+    senaryo = payload.get("video_script", "")
+    baslik = payload.get("video_subject", "Video")
+
+    # 1. Ses ve ASS Altyazı
+    audio_path = "audio.mp3"
+    ass_path = "subtitles.ass"
+    asyncio.run(generate_audio_and_ass(senaryo, "tr-TR-EmelNeural", audio_path, ass_path))
+
+    # 2. Görselleri İndir
+    material_paths = download_materials(sahneler)
+
+    # 3. Config Yaz
+    with open("config.toml", "w", encoding="utf-8") as f:
+        f.write("[app]\nvideo_source = \"local\"\nsubtitle_provider = \"none\"\n")
+
     server = start_server()
     try:
-        r = requests.post(f"{API}/videos", json=payload, timeout=60)
-        r.raise_for_status()
+        # 4. MPT'yi Çalıştır
+        mpt_payload = {
+            "video_subject": baslik,
+            "video_script": senaryo,
+            "video_source": "local",
+            "video_materials": material_paths,
+            "custom_audio_file": os.path.abspath(audio_path),
+            "subtitle_enabled": False,
+            "video_aspect": "9:16",
+            "video_clip_duration": 2,
+            "video_concat_mode": "sequential",
+            "voice_name": "tr-TR-EmelNeural" # MPT bunu kullanmayacak ama hata vermesin
+        }
+        r = requests.post(f"{API}/videos", json=mpt_payload, timeout=60)
         task_id = r.json()["data"]["task_id"]
-        print("task:", task_id)
 
         deadline = time.time() + RENDER_DEADLINE_S
-        task = None
         while time.time() < deadline:
             time.sleep(10)
             task = requests.get(f"{API}/tasks/{task_id}", timeout=30).json().get("data", {})
-            state = task.get("state")
-            print("state:", state, "progress:", task.get("progress"))
-            if state == 1:
-                break
-            if state == -1:
-                raise RuntimeError("MPT görevi başarısız oldu (state=-1). Actions loguna bak.")
-        else:
-            raise TimeoutError(f"Render {RENDER_DEADLINE_S // 60} dakikada bitmedi")
-
-        files = sorted(glob.glob(f"storage/tasks/{task_id}/final-*.mp4"))  # küçük harf 'storage'
-        if not files:
-            raise FileNotFoundError("final-*.mp4 bulunamadı")
+            if task.get("state") == 1: break
+            if task.get("state") == -1: raise RuntimeError("MPT çöktü.")
         
-        # 1. SES NORMALİZASYONU (TikTok Standardı -14 LUFS)
-        print("Ses normalize ediliyor...")
-        path = normalize(files[0])
+        files = sorted(glob.glob(f"storage/tasks/{task_id}/final-*.mp4"))
+        if not files: raise FileNotFoundError("final.mp4 bulunamadı")
 
-        # 2. BOYUT KONTROLÜ VE SIKIŞTIRMA
-        if os.path.getsize(path) > MAX_BYTES:
-            print("Dosya büyük, sıkıştırılıyor:", os.path.getsize(path))
-            path = shrink(path)
-        if os.path.getsize(path) > MAX_BYTES:
-            raise RuntimeError("Sıkıştırmadan sonra bile 50 MB altına inmedi")
+        # 5. Post-Process (Ses Norm + ASS Gömme)
+        print("Ses normalize ediliyor ve altyazı gömülüyor...")
+        norm_path = normalize(files[0])
+        final_path = burn_subtitles(norm_path, os.path.abspath(ass_path))
 
-        w, h, dur = probe(path)
-        with open(path, "rb") as v:
-            tr = requests.post(
-                f"{TG}/sendVideo",
-                data={
-                    "chat_id": CHAT_ID,
-                    "caption": payload["video_subject"][:1000],
-                    "supports_streaming": "true",
-                    "width": w, "height": h, "duration": int(dur),
-                },
-                files={"video": v},
-                timeout=300,
-            )
-        if not tr.ok:
-            raise RuntimeError(f"Telegram sendVideo hatası: {tr.status_code} {tr.text[:300]}")
+        # 6. Telegram'a Gönder
+        if os.path.getsize(final_path) > MAX_BYTES:
+            print("Dosya büyük, sıkıştırılıyor...")
+            subprocess.run(["ffmpeg", "-y", "-i", final_path, "-c:v", "libx264", "-preset", "veryfast", "-b:v", "2000k", "-vf", "scale=720:-2", "-c:a", "aac", "-b:a", "128k", "final-small.mp4"], check=True)
+            final_path = "final-small.mp4"
+
+        with open(final_path, "rb") as v:
+            requests.post(f"{TG}/sendVideo", data={"chat_id": CHAT_ID, "caption": baslik[:1000], "supports_streaming": "true"}, files={"video": v}, timeout=300)
+            
     except Exception as e:
-        notify(f"❌ Video üretilemedi: {e}")
+        requests.post(f"{TG}/sendMessage", json={"chat_id": CHAT_ID, "text": f"❌ Video üretilemedi: {e}"})
         raise
     finally:
         server.terminate()
-
 
 if __name__ == "__main__":
     main()
