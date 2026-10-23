@@ -18,7 +18,7 @@ export default {
         });
 
         try {
-          // GROQ API (Llama 3.3 70B) Kullanımı
+          // GROQ API (Llama 3 70B) Kullanımı
           const apiUrl = "https://api.groq.com/openai/v1/chat/completions";
           
           const groqRes = await fetch(apiUrl, {
@@ -28,11 +28,10 @@ export default {
               "Authorization": `Bearer ${env.GROQ_API_KEY}` // Cloudflare'deki Groq anahtarını kullanır
             },
             body: JSON.stringify({ 
-              model: "openai/gpt-oss-120b",
-              response_format: { "type": "json_object" }, // JSON formatını garantiler
+              model: "llama3-70b-8192", // Groq'un en stabil ve güncel modellerinden biri
               messages: [
-                { role: "system", content: "Sen kısa dikey videolar için senaryo yazan bir yazarsın. SADECE geçerli bir JSON döndür. Başka hiçbir metin yazma." },
-                { role: "user", content: `Konu: ${topic}. Kısa dikey video senaryosu yaz. SADECE şu JSON formatında dön: {"baslik":"...", "senaryo":"...", "gorseller":["terim 1", "terim 2"]}` }
+                { role: "system", content: "Sen kısa dikey videolar için senaryo yazan bir yazarsın. SADECE geçerli bir JSON döndür. Başka hiçbir metin yazma. JSON formatı şu şekilde olmalı: {\"baslik\":\"...\", \"senaryo\":\"...\", \"gorseller\":[\"terim 1\", \"terim 2\"]}" },
+                { role: "user", content: `Konu: ${topic}. Kısa dikey video senaryosu yaz.` }
               ],
               temperature: 0.7
             })
@@ -46,7 +45,9 @@ export default {
           }
           
           if (groqData.choices && groqData.choices[0].message.content) {
-              const text = groqData.choices[0].message.content;
+              // Modelin döndürdüğü metni temizle (bazen ```json ... ``` şeklinde dönebilir)
+              let text = groqData.choices[0].message.content;
+              text = text.replace(/```json/g, "").replace(/```/g, "").trim();
               
               // Gelen metni JSON olarak ayrıştır
               const data = JSON.parse(text); 
