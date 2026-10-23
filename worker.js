@@ -5,19 +5,17 @@ const tg = (env, method, payload) =>
     body: JSON.stringify(payload),
   });
 
-// ACIMASIZ PROMPT: Görsellerin saçmalamasını (Buda heykeli vb.) engelleyen katı kurallar
 const SYSTEM_PROMPT = `Sen Türkiye'deki TikTok/Reels/Shorts için konuşma metni yazan acımasız bir kısa video yazarısın.
 SADECE geçerli JSON döndür. Şema:
-{"baslik":"...","senaryo":"...","gorseller":["english query"]}
+{"baslik":"...","senaryo":"...","sahneler":[{"query":"...","kaynak":"pixabay"}]}
 
 KURALLAR:
 1. "senaryo" SADECE seslendirmede okunacak cümleleri içerir. Zaman damgası, "Sahne", "Kesit", "Ses:", "Metin:", parantez, tırnak işareti, hashtag, kanal/logo/CTA talimatı YASAK. Kamera veya görüntü tarifi YASAK.
 2. İlk cümle (Kanca) en fazla 8 kelime olsun: ilk saniyede merak, çelişki veya somut bir iddia. "Merhaba", "Bugün", "Biliyor muydunuz" ve "dünyayı değiştiren" gibi girişler KESİNLİKLE YASAK.
 3. Toplam 85-105 kelime. Her cümle en fazla 12 kelime. Cümle uzunluklarını değiştir.
-4. Her 2 cümlede en az bir somut unsur olsun: sayı, isim, yer, tarih veya gündelik bir an. Şu kalıplar YASAK: "geleceğin", "sınırları zorlamak", "hayatımızın bir parçası", "yolculuğa katıl", "çağında".
-5. İkinci tekil şahısla konuş ("sen"). En az bir net görüş cümlesi olsun. Uydurma istatistik YASAK.
-6. Son cümle bir sonraki videoya merak bıraksın veya ilk cümleye geri dönsün. "Takip et", "katıl" gibi boş çağrı YASAK.
-7. "gorseller": tam 10 adet, İNGİLİZCE, 2 kelime. KESİNLİKLE SOMUT NESNELER VE EYLEMLER kullan (örn. "person typing laptop", "robot arm factory", "glowing microchip", "drone flying city"). Soyut kelime (future, technology, innovation, concept, ai, cross, god, religion, flag) YASAK. Görseller senaryo sırasını izlesin.`;
+4. Her 2 cümlede en az bir somut unsur olsun: sayı, isim, yer, tarih veya gündelik bir an.
+5. "sahneler": tam 10 adet. Her sahne için "query" KESİNLİKLE İNGİLİZCE, 2 kelime ve SOMUT NESNELER/EYLEMLER olmalı (örn. "person typing laptop", "robot arm factory"). Soyut kelimeler (future, technology, ai, cross, god) YASAK.
+6. "kaynak": Eğer sahne çok modern, sinematik bir teknolojiyi anlatıyorsa "coverr", genel bir nesne veya gündelik bir eylemse "pixabay" seç.`;
 
 async function yeniSenaryo(env, chatId, topic) {
   try {
@@ -67,9 +65,10 @@ async function onayla(env, cq) {
   }
 
   await env.KV.delete(`s:${id}`);
-
   const d = JSON.parse(raw);
-  const payload = { video_subject: d.baslik, video_script: d.senaryo, video_terms: d.gorseller };
+  
+  // Render.py'ye sahneleri ve seçilen kaynakları gönderiyoruz
+  const payload = { video_subject: d.baslik, video_script: d.senaryo, sahneler: d.sahneler };
 
   const gh = await fetch(
     `https://api.github.com/repos/${env.GITHUB_USER}/${env.GITHUB_REPO}/actions/workflows/video-uret.yml/dispatches`,
