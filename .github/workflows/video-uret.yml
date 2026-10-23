@@ -12,12 +12,14 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # Tag/branch değil, commit SHA'sına sabitle
   MPT_REF: f063a2b95e0f71f60891ac1c7b53add684bc6a46
 
 jobs:
   render:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+
     steps:
       - uses: actions/checkout@v4
 
@@ -33,18 +35,12 @@ jobs:
           cache: pip
           cache-dependency-path: mpt/requirements.txt
 
-      - name: ffmpeg
-        timeout-minutes: 4
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then
-            echo "ffmpeg zaten kurulu"
-          else
-            sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=15
-            sudo apt-get install -y --no-install-recommends ffmpeg
-          fi
-          ffmpeg -version | head -1
+      # FFMPEG'İ HAZIR EKLENTİ İLE SANİYELER İÇİNDE KUR (Apt-get yok, timeout yok)
+      - name: FFmpeg Kurulumu
+        uses: FedericoCarboni/setup-ffmpeg@v3
+        with:
+          ffmpeg-version: release
+          architecture: x64
 
       - name: Python bağımlılıkları
         timeout-minutes: 8
