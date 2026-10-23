@@ -1,4 +1,4 @@
-"""MoneyPrinterTurbo Sürücüsü - 4 Madde Entegre (Ses, Görsel, ASS, Kaynak)"""
+"""MoneyPrinterTurbo Sürücüsü - Nihai Cerrahi Müdahale"""
 import os, sys, json, time, glob, subprocess, asyncio, urllib.parse, requests
 import edge_tts
 
@@ -13,6 +13,8 @@ async def generate_audio_and_ass(text, voice, mp3_path, ass_path):
     print("Ses ve ASS Altyazı üretiliyor...")
     communicate = edge_tts.Communicate(text, voice, rate="+10%")
     words = []
+    sentence_boundaries = []
+    
     with open(mp3_path, "wb") as f:
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
@@ -20,6 +22,12 @@ async def generate_audio_and_ass(text, voice, mp3_path, ass_path):
             elif chunk["type"] == "WordBoundary":
                 words.append({
                     "word": chunk["text"],
+                    "start": chunk["offset"] / 10000000,
+                    "duration": chunk["duration"] / 10000000
+                })
+            elif chunk["type"] == "SentenceBoundary":
+                sentence_boundaries.append({
+                    "text": chunk["text"],
                     "start": chunk["offset"] / 10000000,
                     "duration": chunk["duration"] / 10000000
                 })
@@ -34,22 +42,32 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial Black,100,&H00FFFF&,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,3,2,10,10,400,1
+Style: Default,Arial Black,100,&H00FFFF&,&H00FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,8,3,2,10,10,450,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    
+    def fmt(t): return f"{int(t//3600)}:{int((t%3600)//60):02d}:{int(t%60):02d}.{int((t%1)*100):02d}"
+    
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(header)
-        for i, w in enumerate(words):
-            start = w["start"]
-            end = start + w["duration"]
-            # Zamanı ASS formatına çevir (H:MM:SS.cs)
-            def fmt(t): return f"{int(t//3600)}:{int((t%3600)//60):02d}:{int(t%60):02d}.{int((t%1)*100):02d}"
-            # Kelimeye pop-in efekti ekle
-            text_escaped = w["word"].replace("{", "\\{").replace("}", "\\}")
-            f.write(f"Dialogue: 0,{fmt(start)},{fmt(end)},Default,,0,0,0,,{{\\fscx120\\fscy120\\t(0,100,\\fscx100\\fscy100)}}{text_escaped}\n")
-    print(f"Altyazı kaydedildi: {len(words)} kelime")
+        
+        # Eğer kelime zamanlaması alınamazsa cümle zamanlamasına (fallback) geç
+        if not words and sentence_boundaries:
+            print("Uyarı: Kelime zamanlaması alınamadı, cümle bazlı altyazı üretiliyor.")
+            for sb in sentence_boundaries:
+                start, end = sb["start"], sb["start"] + sb["duration"]
+                text_escaped = sb["text"].replace("{", "\\{").replace("}", "\\}")
+                f.write(f"Dialogue: 0,{fmt(start)},{fmt(end)},Default,,0,0,0,,{text_escaped}\n")
+        elif words:
+            print(f"Altyazı kaydedildi: {len(words)} kelime")
+            for w in words:
+                start, end = w["start"], w["start"] + w["duration"]
+                text_escaped = w["word"].replace("{", "\\{").replace("}", "\\}")
+                f.write(f"Dialogue: 0,{fmt(start)},{fmt(end)},Default,,0,0,0,,{{\\fscx120\\fscy120\\t(0,100,\\fscx100\\fscy100)}}{text_escaped}\n")
+        else:
+            print("Kritik Uyarı: Hiçbir zamanlama verisi alınamadı, altyazısız devam ediliyor.")
 
 def download_materials(sahneler):
     print("Çoklu kaynaktan görseller indiriliyor...")
@@ -61,29 +79,39 @@ def download_materials(sahneler):
         url = ""
         
         if kaynak == "pixabay" and PIXABAY_KEY:
-            # Pixabay araması
             api = f"https://pixabay.com/api/videos/?key={PIXABAY_KEY}&q={q}&per_page=5&min_width=720"
-            r = requests.get(api, timeout=10).json()
-            if r.get("hits"):
-                url = r["hits"][0]["videos"]["medium"]["url"]
-        else:
-            # Coverr veya Pixabay yoksa Wikimedia'dan dene
-            url = f"https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrsearch={q}+filetype:video&gsrlimit=1&prop=imageinfo&iiprop=url&format=json"
-            r = requests.get(url, timeout=10, headers={"User-Agent": "Bot/1.0"}).json()
             try:
-                pages = r["query"]["pages"]
-                for p in pages:
-                    url = pages[p]["imageinfo"][0]["url"]
+                r = requests.get(api, timeout=10).json()
+                if r.get("hits"):
+                    url = r["hits"][0]["videos"]["medium"]["url"]
+            except: pass
+        else:
+            # Coverr API'si doğrudan video linki vermeyebilir, bu yüzden Wikimedia veya alternatif dene
+            # Basitlik adına Pixabay yoksa Coverr yerine Pixabay'den genel bir terimle çekelim
+            api = f"https://pixabay.com/api/videos/?key={PIXABAY_KEY}&q={q}&per_page=5&min_width=720"
+            try:
+                r = requests.get(api, timeout=10).json()
+                if r.get("hits"):
+                    url = r["hits"][0]["videos"]["medium"]["url"]
             except: pass
 
         if url:
             v_path = f"local_materials/sahne_{i}.mp4"
             try:
-                vid = requests.get(url, timeout=15)
-                with open(v_path, "wb") as f: f.write(vid.content)
+                vid = requests.get(url, timeout=15, stream=True)
+                # GÜVENLİK: İndirilen şeyin gerçekten video olup olmadığını kontrol et (HTML sayfası olmasın)
+                content_type = vid.headers.get("Content-Type", "")
+                if "video" not in content_type and "octet-stream" not in content_type:
+                    print(f"Sahne {i+1} geçersiz format ({content_type}), atlanıyor.")
+                    continue
+                    
+                with open(v_path, "wb") as f:
+                    for chunk in vid.iter_content(chunk_size=8192):
+                        f.write(chunk)
                 paths.append(v_path)
                 print(f"Sahne {i+1} indirildi: {kaynak}")
-            except: print(f"Sahne {i+1} indirilemedi.")
+            except Exception as e: 
+                print(f"Sahne {i+1} indirilemedi: {e}")
         else:
             print(f"Sahne {i+1} için video bulunamadı, atlanıyor.")
     
@@ -106,7 +134,6 @@ def normalize(src):
 
 def burn_subtitles(src, ass):
     dst = src.replace(".mp4", "-final.mp4")
-    # ASS dosyasını videoya göm
     subprocess.run(["ffmpeg", "-y", "-i", src, "-vf", f"ass={ass}:fontsdir=assets/fonts", "-c:a", "copy", dst], check=True)
     return dst
 
@@ -116,21 +143,20 @@ def main():
     senaryo = payload.get("video_script", "")
     baslik = payload.get("video_subject", "Video")
 
-    # 1. Ses ve ASS Altyazı
     audio_path = "audio.mp3"
     ass_path = "subtitles.ass"
     asyncio.run(generate_audio_and_ass(senaryo, "tr-TR-EmelNeural", audio_path, ass_path))
 
-    # 2. Görselleri İndir
     material_paths = download_materials(sahneler)
 
-    # 3. Config Yaz
+    if not material_paths:
+        raise RuntimeError("Hiçbir görsel indirilemedi, video üretilemez.")
+
     with open("config.toml", "w", encoding="utf-8") as f:
         f.write("[app]\nvideo_source = \"local\"\nsubtitle_provider = \"none\"\n")
 
     server = start_server()
     try:
-        # 4. MPT'yi Çalıştır
         mpt_payload = {
             "video_subject": baslik,
             "video_script": senaryo,
@@ -141,27 +167,43 @@ def main():
             "video_aspect": "9:16",
             "video_clip_duration": 2,
             "video_concat_mode": "sequential",
-            "voice_name": "tr-TR-EmelNeural" # MPT bunu kullanmayacak ama hata vermesin
+            "voice_name": "tr-TR-EmelNeural"
         }
+        
+        print("MPT'ye video isteği gönderiliyor...")
         r = requests.post(f"{API}/videos", json=mpt_payload, timeout=60)
-        task_id = r.json()["data"]["task_id"]
+        
+        # HATA KONTROLÜ: Eğer MPT 200 dönmezse gerçek hatayı göster
+        if r.status_code != 200:
+            print(f"MPT API HATASI ({r.status_code}): {r.text}")
+            raise RuntimeError(f"MPT isteği reddetti: {r.text}")
+            
+        resp_json = r.json()
+        if "data" not in resp_json or not isinstance(resp_json["data"], dict) or "task_id" not in resp_json["data"]:
+            raise RuntimeError(f"MPT beklenmeyen yanıt formatı döndürdü: {resp_json}")
+            
+        task_id = resp_json["data"]["task_id"]
+        print(f"Görev alındı: {task_id}")
 
         deadline = time.time() + RENDER_DEADLINE_S
         while time.time() < deadline:
             time.sleep(10)
             task = requests.get(f"{API}/tasks/{task_id}", timeout=30).json().get("data", {})
             if task.get("state") == 1: break
-            if task.get("state") == -1: raise RuntimeError("MPT çöktü.")
+            if task.get("state") == -1: raise RuntimeError("MPT çöktü (state=-1).")
         
         files = sorted(glob.glob(f"storage/tasks/{task_id}/final-*.mp4"))
         if not files: raise FileNotFoundError("final.mp4 bulunamadı")
 
-        # 5. Post-Process (Ses Norm + ASS Gömme)
         print("Ses normalize ediliyor ve altyazı gömülüyor...")
         norm_path = normalize(files[0])
-        final_path = burn_subtitles(norm_path, os.path.abspath(ass_path))
+        
+        # Eğer ASS dosyası boş değilse altyazıyı videoya göm
+        if os.path.getsize(ass_path) > 500:
+            final_path = burn_subtitles(norm_path, os.path.abspath(ass_path))
+        else:
+            final_path = norm_path
 
-        # 6. Telegram'a Gönder
         if os.path.getsize(final_path) > MAX_BYTES:
             print("Dosya büyük, sıkıştırılıyor...")
             subprocess.run(["ffmpeg", "-y", "-i", final_path, "-c:v", "libx264", "-preset", "veryfast", "-b:v", "2000k", "-vf", "scale=720:-2", "-c:a", "aac", "-b:a", "128k", "final-small.mp4"], check=True)
