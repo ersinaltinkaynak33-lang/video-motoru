@@ -5,6 +5,20 @@ const tg = (env, method, payload) =>
     body: JSON.stringify(payload),
   });
 
+// ACIMASIZ PROMPT: Görsellerin saçmalamasını (Buda heykeli vb.) engelleyen katı kurallar
+const SYSTEM_PROMPT = `Sen Türkiye'deki TikTok/Reels/Shorts için konuşma metni yazan acımasız bir kısa video yazarısın.
+SADECE geçerli JSON döndür. Şema:
+{"baslik":"...","senaryo":"...","gorseller":["english query"]}
+
+KURALLAR:
+1. "senaryo" SADECE seslendirmede okunacak cümleleri içerir. Zaman damgası, "Sahne", "Kesit", "Ses:", "Metin:", parantez, tırnak işareti, hashtag, kanal/logo/CTA talimatı YASAK. Kamera veya görüntü tarifi YASAK.
+2. İlk cümle (Kanca) en fazla 8 kelime olsun: ilk saniyede merak, çelişki veya somut bir iddia. "Merhaba", "Bugün", "Biliyor muydunuz" ve "dünyayı değiştiren" gibi girişler KESİNLİKLE YASAK.
+3. Toplam 85-105 kelime. Her cümle en fazla 12 kelime. Cümle uzunluklarını değiştir.
+4. Her 2 cümlede en az bir somut unsur olsun: sayı, isim, yer, tarih veya gündelik bir an. Şu kalıplar YASAK: "geleceğin", "sınırları zorlamak", "hayatımızın bir parçası", "yolculuğa katıl", "çağında".
+5. İkinci tekil şahısla konuş ("sen"). En az bir net görüş cümlesi olsun. Uydurma istatistik YASAK.
+6. Son cümle bir sonraki videoya merak bıraksın veya ilk cümleye geri dönsün. "Takip et", "katıl" gibi boş çağrı YASAK.
+7. "gorseller": tam 10 adet, İNGİLİZCE, 2 kelime. KESİNLİKLE SOMUT NESNELER VE EYLEMLER kullan (örn. "person typing laptop", "robot arm factory", "glowing microchip", "drone flying city"). Soyut kelime (future, technology, innovation, concept, ai, cross, god, religion, flag) YASAK. Görseller senaryo sırasını izlesin.`;
+
 async function yeniSenaryo(env, chatId, topic) {
   try {
     const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -17,7 +31,7 @@ async function yeniSenaryo(env, chatId, topic) {
         model: "openai/gpt-oss-120b",
         temperature: 0.7,
         messages: [
-          { role: "system", content: 'Kısa dikey videolar için senaryo yaz. Sadece JSON döndür: {"baslik":"...","senaryo":"...","gorseller":["terim 1", "terim 2"]}. "gorseller" kesinlikle İngilizce olmalı ve 1-3 kelimelik somut Pixabay arama terimleri olmalı.' },
+          { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: `Konu: ${topic}` },
         ],
       }),
@@ -87,7 +101,6 @@ export default {
     const chatId = body.message?.chat.id ?? body.callback_query?.message.chat.id;
     const fromId = body.message?.from?.id ?? body.callback_query?.from?.id;
 
-    // Sadece senin kullanıcı ID'ne izin ver (Spam koruması devam ediyor)
     if (String(fromId) !== env.ALLOWED_USER_ID) {
         return new Response("Yetkisiz kullanıcı", { status: 403 });
     }
