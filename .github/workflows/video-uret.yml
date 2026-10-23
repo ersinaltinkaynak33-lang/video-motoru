@@ -35,10 +35,23 @@ jobs:
           cache: pip
           cache-dependency-path: mpt/requirements.txt
 
-      - name: Bağımlılıklar (cache'li)
+      - name: ffmpeg
+        timeout-minutes: 4
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          command -v ffmpeg >/dev/null || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
-          pip install -r mpt/requirements.txt
+          if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then
+            echo "ffmpeg zaten kurulu"
+          else
+            sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=15
+            sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: Python bağımlılıkları (ilk koşuda cache boş)
+        timeout-minutes: 8
+        run: pip install -r mpt/requirements.txt
 
       - name: Render + Telegram
         working-directory: mpt
