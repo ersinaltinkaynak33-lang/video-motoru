@@ -1,4 +1,4 @@
-"""MoneyPrinterTurbo Sürücüsü - Nihai Cerrahi Müdahale"""
+"""MoneyPrinterTurbo Sürücüsü - Nihai Cerrahi Müdahale (v2)"""
 import os, sys, json, time, glob, subprocess, asyncio, urllib.parse, requests
 import edge_tts
 
@@ -32,7 +32,6 @@ async def generate_audio_and_ass(text, voice, mp3_path, ass_path):
                     "duration": chunk["duration"] / 10000000
                 })
     
-    # ASS Formatı (Hormozi Tarzı - Kelime Kelime Vurgulu)
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -52,8 +51,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(header)
-        
-        # Eğer kelime zamanlaması alınamazsa cümle zamanlamasına (fallback) geç
         if not words and sentence_boundaries:
             print("Uyarı: Kelime zamanlaması alınamadı, cümle bazlı altyazı üretiliyor.")
             for sb in sentence_boundaries:
@@ -78,16 +75,8 @@ def download_materials(sahneler):
         kaynak = sahne["kaynak"]
         url = ""
         
-        if kaynak == "pixabay" and PIXABAY_KEY:
-            api = f"https://pixabay.com/api/videos/?key={PIXABAY_KEY}&q={q}&per_page=5&min_width=720"
-            try:
-                r = requests.get(api, timeout=10).json()
-                if r.get("hits"):
-                    url = r["hits"][0]["videos"]["medium"]["url"]
-            except: pass
-        else:
-            # Coverr API'si doğrudan video linki vermeyebilir, bu yüzden Wikimedia veya alternatif dene
-            # Basitlik adına Pixabay yoksa Coverr yerine Pixabay'den genel bir terimle çekelim
+        # Pixabay'den arama
+        if PIXABAY_KEY:
             api = f"https://pixabay.com/api/videos/?key={PIXABAY_KEY}&q={q}&per_page=5&min_width=720"
             try:
                 r = requests.get(api, timeout=10).json()
@@ -99,7 +88,6 @@ def download_materials(sahneler):
             v_path = f"local_materials/sahne_{i}.mp4"
             try:
                 vid = requests.get(url, timeout=15, stream=True)
-                # GÜVENLİK: İndirilen şeyin gerçekten video olup olmadığını kontrol et (HTML sayfası olmasın)
                 content_type = vid.headers.get("Content-Type", "")
                 if "video" not in content_type and "octet-stream" not in content_type:
                     print(f"Sahne {i+1} geçersiz format ({content_type}), atlanıyor.")
@@ -157,11 +145,14 @@ def main():
 
     server = start_server()
     try:
+        # GÜNCELLEME BURADA: video_materials artık sözlük listesi
+        formatted_materials = [{"type": "video", "path": os.path.abspath(p)} for p in material_paths]
+        
         mpt_payload = {
             "video_subject": baslik,
             "video_script": senaryo,
             "video_source": "local",
-            "video_materials": material_paths,
+            "video_materials": formatted_materials, # DÜZELTİLDİ
             "custom_audio_file": os.path.abspath(audio_path),
             "subtitle_enabled": False,
             "video_aspect": "9:16",
@@ -173,15 +164,11 @@ def main():
         print("MPT'ye video isteği gönderiliyor...")
         r = requests.post(f"{API}/videos", json=mpt_payload, timeout=60)
         
-        # HATA KONTROLÜ: Eğer MPT 200 dönmezse gerçek hatayı göster
         if r.status_code != 200:
             print(f"MPT API HATASI ({r.status_code}): {r.text}")
             raise RuntimeError(f"MPT isteği reddetti: {r.text}")
             
         resp_json = r.json()
-        if "data" not in resp_json or not isinstance(resp_json["data"], dict) or "task_id" not in resp_json["data"]:
-            raise RuntimeError(f"MPT beklenmeyen yanıt formatı döndürdü: {resp_json}")
-            
         task_id = resp_json["data"]["task_id"]
         print(f"Görev alındı: {task_id}")
 
@@ -198,7 +185,6 @@ def main():
         print("Ses normalize ediliyor ve altyazı gömülüyor...")
         norm_path = normalize(files[0])
         
-        # Eğer ASS dosyası boş değilse altyazıyı videoya göm
         if os.path.getsize(ass_path) > 500:
             final_path = burn_subtitles(norm_path, os.path.abspath(ass_path))
         else:
