@@ -1,108 +1,127 @@
+// Cloudflare Worker: Telegram -> Groq (senaryo + sahne) -> GitHub Actions dispatch
+//
+// Gerekli secret'lar (wrangler secret put ...):
+//   TELEGRAM_TOKEN, GROQ_API_KEY, GITHUB_TOKEN, WEBHOOK_SECRET
+// Webhook'u şu şekilde kaydedin (secret_token ŞART, yoksa herkes sahte update gönderebilir):
+//   curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+//        -d url=https://<worker-adresi>/webhook -d secret_token=<WEBHOOK_SECRET>
+
+const N_SCENES = 10;
+const GROQ_ATTEMPT_MS = 11000; // 2 deneme + Telegram çağrıları < 30 sn (ctx.waitUntil sınırı)
+
 const tg = (env, method, payload) =>
   fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  });
+  }).catch((e) => console.error("Telegram hatası:", method, e.message));
 
-const SYSTEM_PROMPT = `Sen Türkiye'deki TikTok/Reels/Shorts için konuşma metni yazan acımasız bir kısa video yazarısın.
-SADECE geçerli JSON döndür. Şema:
-{"baslik":"...","senaryo":"...","sahneler":[{"query":"...","kaynak":"pixabay"}]}
+const SYSTEM_PROMPT = `Sen Türkiye'deki TikTok/Reels/Shorts için konuşma metni yazan, iddialı ama dürüst bir kısa video yazarısın.
+SADECE geçerli JSON döndür. Şema (tam ${N_SCENES} eleman):
+{"baslik":"...","cumleler":[{"metin":"...","query":"..."}]}
+
+Her eleman bir cümle ve o cümle okunurken ekranda görünecek sahneyi temsil eder.
 
 KURALLAR:
-1. "senaryo" SADECE seslendirmede okunacak cümleleri içerir. Zaman damgası, "Sahne", "Kesit", "Ses:", "Metin:", parantez, tırnak işareti, hashtag, kanal/logo/CTA talimatı YASAK. Kamera veya görüntü tarifi YASAK.
-2. İlk cümle (Kanca) en fazla 8 kelime olsun: ilk saniyede merak, çelişki veya somut bir iddia. "Merhaba", "Bugün", "Biliyor muydunuz" ve "dünyayı değiştiren" gibi girişler KESİNLİKLE YASAK.
-3. Toplam 85-105 kelime. Her cümle en fazla 12 kelime. Cümle uzunluklarını değiştir.
-4. Her 2 cümlede en az bir somut unsur olsun: sayı, isim, yer, tarih veya gündelik bir an.
-5. "sahneler": tam 10 adet. Her sahne için "query" KESİNLİKLE İNGİLİZCE, 2 kelime ve SOMUT NESNELER/EYLEMLER olmalı (örn. "person typing laptop", "robot arm factory"). Soyut kelimeler (future, technology, ai, cross, god) YASAK.
-6. "kaynak": Eğer sahne çok modern, sinematik bir teknolojiyi anlatıyorsa "coverr", genel bir nesne veya gündelik bir eylemse "pixabay" seç.`;
+1. "metin": SADECE seslendirmede okunacak tek bir cümle. Zaman damgası, "Sahne", "Kesit", parantez, tırnak işareti, hashtag, emoji, CTA/logo/kamera tarifi YASAK.
+2. İlk cümle (kanca) en fazla 8 kelime: merak, çelişki veya net bir iddia. "Merhaba", "Bugün", "Biliyor muydunuz", "dünyayı değiştiren" gibi girişler YASAK.
+3. Toplam 80-100 kelime. Her cümle en fazla 12 kelime. Cümle uzunluklarını değiştir. Son cümle güçlü bir kapanış olsun.
+4. DOĞRULUK: Emin olmadığın hiçbir rakam, yıl, şirket olayı, ürün özelliği veya isim UYDURMA. Somutluğu herkesin bildiği kalıcı gerçeklerle, karşılaştırmalarla ve gündelik anlarla sağla. Şüphen varsa rakam verme, niteleyici kullan.
+5. "query": İNGİLİZCE, 2-3 kelime, kameraya çekilebilir SOMUT nesne+eylem (örn. "person typing laptop", "robot arm factory"). Marka, ürün, kişi adı ve soyut kelime (future, technology, ai, concept, innovation) YASAK. Her sahnenin query'si farklı olsun ve o cümlenin anlattığı şeyi göstersin.`;
 
-async function groqCagir(env, messages, retry = 1) {
-  try {
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${env.GROQ_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: "openai/gpt-oss-120b",
-        temperature: 0.7,
-        response_format: { type: "json_object" }, // JSON garantisi
-        messages: messages,
-      }),
-      signal: AbortSignal.timeout(20000),
-    });
-    
-    if (!res.ok) {
-      throw new Error(`API HTTP Hatası: ${res.status}`);
-    }
-    
-    const j = await res.json();
-    if (j.error) throw new Error(j.error.message);
-    
-    let text = j.choices[0].message.content;
-    if (!text || text.trim() === "") {
-      throw new Error("Yapay zeka boş yanıt döndürdü.");
-    }
+function dogrula(d) {
+  const err = [];
+  if (!d || typeof d.baslik !== "string" || !d.baslik.trim()) err.push("baslik eksik");
+  const c = Array.isArray(d?.cumleler) ? d.cumleler : [];
+  if (c.length !== N_SCENES) err.push(`cumleler tam ${N_SCENES} eleman olmalı, ${c.length} geldi`);
+  c.forEach((x, i) => {
+    const m = typeof x?.metin === "string" ? x.metin.trim() : "";
+    const q = typeof x?.query === "string" ? x.query.trim() : "";
+    if (!m) err.push(`${i + 1}. metin boş`);
+    if (/[()\[\]"“”#]|sahne\s*\d|kesit/i.test(m)) err.push(`${i + 1}. metinde yasak karakter/ifade var`);
+    if (!/^[A-Za-z]+( [A-Za-z]+){1,2}$/.test(q)) err.push(`${i + 1}. query İngilizce 2-3 kelime olmalı`);
+  });
+  const wc = c.map((x) => String(x?.metin || "").trim().split(/\s+/).filter(Boolean).length);
+  const toplam = wc.reduce((a, b) => a + b, 0);
+  if (c.length && (toplam < 65 || toplam > 115)) err.push(`toplam ${toplam} kelime (80-100 olmalı)`);
+  if (wc[0] > 10) err.push("ilk cümle 8 kelimeyi aşıyor");
+  return err;
+}
 
-    // Markdown etiketlerini temizle
-    text = text.replace(/```json/g, "").replace(/```/g, "").trim();
-    
-    // Güvenli JSON ayrıştırma
-    return JSON.parse(text);
-    
-  } catch (err) {
-    if (retry > 0) {
-      console.log("Groq Hatası, tekrar deneniyor...", err.message);
-      await new Promise(r => setTimeout(r, 2000)); // 2 saniye bekle
-      return groqCagir(env, messages, retry - 1);
+async function groqTek(env, messages) {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.GROQ_API_KEY}` },
+    body: JSON.stringify({
+      model: "openai/gpt-oss-120b",
+      temperature: 0.7,
+      reasoning_effort: "low",
+      max_completion_tokens: 3000,
+      response_format: { type: "json_object" },
+      messages,
+    }),
+    signal: AbortSignal.timeout(GROQ_ATTEMPT_MS),
+  });
+  if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
+  const j = await res.json();
+  if (j.error) throw new Error(j.error.message);
+  let text = j.choices?.[0]?.message?.content;
+  if (!text || !text.trim()) throw new Error("Groq boş yanıt döndürdü");
+  text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  return JSON.parse(text);
+}
+
+// En fazla 2 deneme; ikincide ilk denemenin hataları modele geri bildirim olarak verilir.
+async function senaryoUret(env, topic) {
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    { role: "user", content: `Konu: ${topic}` },
+  ];
+  let sonHata = "";
+  for (let deneme = 0; deneme < 2; deneme++) {
+    try {
+      const d = await groqTek(env, messages);
+      const err = dogrula(d);
+      if (!err.length) return d;
+      sonHata = err.slice(0, 4).join("; ");
+      messages.push({ role: "assistant", content: JSON.stringify(d) });
+      messages.push({ role: "user", content: `Reddedildi: ${sonHata}. Kuralları düzelterek JSON'u baştan yaz.` });
+    } catch (e) {
+      sonHata = e.message;
     }
-    throw err;
   }
+  throw new Error(`Senaryo üretilemedi (${sonHata})`);
 }
 
 async function yeniSenaryo(env, chatId, topic) {
   try {
-    const messages = [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: `Konu: ${topic}` },
-    ];
-
-    // Groq'ya gönder ve JSON al
-    const data = await groqCagir(env, messages, 2); // 2 kez deneme hakkı
-
-    // Gelen verinin doğruluğunu kontrol et
-    if (!data.baslik || !data.senaryo || !Array.isArray(data.sahneler)) {
-      throw new Error("Yapay zeka geçerli bir formatta yanıt vermedi.");
-    }
-
+    const d = await senaryoUret(env, topic);
+    const scenes = d.cumleler.map((x) => ({ text: x.metin.trim(), query: x.query.trim() }));
     const id = crypto.randomUUID().slice(0, 8);
-    await env.KV.put(`s:${id}`, JSON.stringify(data), { expirationTtl: 3600 });
+    await env.KV.put(`s:${id}`, JSON.stringify({ baslik: d.baslik.trim(), scenes }), { expirationTtl: 3600 });
 
+    const senaryo = scenes.map((s) => s.text).join(" ");
     await tg(env, "sendMessage", {
       chat_id: chatId,
-      text: `📋 SENARYO:\n\n${data.senaryo}\n\nOnaylıyor musunuz?`,
+      text: `📋 ${d.baslik.trim()}\n\n${senaryo}\n\n🎞 ${scenes.map((s) => s.query).join(" · ")}\n\nOnaylıyor musunuz?`,
       reply_markup: { inline_keyboard: [[{ text: "✅ Onayla", callback_data: `onayla:${id}` }]] },
     });
   } catch (err) {
-    console.error("Senaryo Hatası:", err);
-    await tg(env, "sendMessage", { chat_id: chatId, text: `❌ Hata: ${err.message}` });
+    console.error("Senaryo hatası:", err);
+    await tg(env, "sendMessage", { chat_id: chatId, text: `❌ ${err.message}` });
   }
 }
 
 async function onayla(env, cq) {
+  const answer = (text) => tg(env, "answerCallbackQuery", { callback_query_id: cq.id, text });
   const id = cq.data.replace("onayla:", "");
-  const raw = await env.KV.get(`s:${id}`);
-  
-  if (!raw) {
-    return tg(env, "answerCallbackQuery", { callback_query_id: cq.id, text: "⏳ Süresi dolmuş, tekrar /yeni deneyin." });
-  }
+  const key = `s:${id}`;
+  const raw = await env.KV.get(key);
+  if (!raw) return answer("⏳ Süresi dolmuş veya zaten onaylanmış. /yeni ile tekrar deneyin.");
 
-  await env.KV.delete(`s:${id}`);
+  await env.KV.delete(key);
   const d = JSON.parse(raw);
-  
-  const payload = { video_subject: d.baslik, video_script: d.senaryo, sahneler: d.sahneler };
+  const payload = { video_subject: d.baslik, scenes: d.scenes };
 
   const gh = await fetch(
     `https://api.github.com/repos/${env.GITHUB_USER}/${env.GITHUB_REPO}/actions/workflows/video-uret.yml/dispatches`,
@@ -118,41 +137,62 @@ async function onayla(env, cq) {
     }
   );
 
-  await tg(env, "answerCallbackQuery", {
-    callback_query_id: cq.id,
-    text: gh.status === 204 ? "✅ Onaylandı! Video üretimi başladı." : `❌ GitHub hatası: ${gh.status}`,
-  });
+  if (gh.status === 204) {
+    // çift tıklamayı engelle: butonu kaldır
+    if (cq.message) {
+      await tg(env, "editMessageReplyMarkup", {
+        chat_id: cq.message.chat.id,
+        message_id: cq.message.message_id,
+        reply_markup: { inline_keyboard: [] },
+      });
+    }
+    return answer("✅ Onaylandı! Video üretimi başladı.");
+  }
+  // başarısızsa senaryo kaybolmasın
+  await env.KV.put(key, raw, { expirationTtl: 3600 });
+  const detay = (await gh.text()).slice(0, 150);
+  return answer(`❌ GitHub ${gh.status}: ${detay}`.slice(0, 190));
 }
 
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (request.method !== "POST" || url.pathname !== "/webhook")
-      return new Response("Bot Aktif");
+    if (request.method !== "POST" || url.pathname !== "/webhook") return new Response("Bot Aktif");
 
-    const body = await request.json();
-    const chatId = body.message?.chat.id ?? body.callback_query?.message.chat.id;
-    const fromId = body.message?.from?.id ?? body.callback_query?.from?.id;
-
-    if (String(fromId) !== env.ALLOWED_USER_ID) {
-        return new Response("Yetkisiz kullanıcı", { status: 403 });
+    // Telegram update'leri imzasız gelir; from.id kolayca taklit edilir. Gizli başlık şart.
+    if (!env.WEBHOOK_SECRET || request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) {
+      return new Response("Yetkisiz", { status: 401 });
     }
 
-    const m = body.message?.text?.match(/^\/yeni(?:@\w+)?\s*(.*)$/s);
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response("Geçersiz JSON", { status: 400 });
+    }
+
+    const msg = body.message;
+    const cq = body.callback_query;
+    const chatId = msg?.chat?.id ?? cq?.message?.chat?.id;
+    const fromId = msg?.from?.id ?? cq?.from?.id;
+    if (String(fromId) !== String(env.ALLOWED_USER_ID)) return new Response("Yetkisiz kullanıcı", { status: 403 });
+
+    const m = msg?.text?.match(/^\/yeni(?:@\w+)?\s*(.*)$/s);
     if (m) {
-      const topic = m[1].trim();
+      const topic = m[1].trim().slice(0, 300);
       if (!topic) {
         ctx.waitUntil(tg(env, "sendMessage", { chat_id: chatId, text: "Kullanım: /yeni <konu>" }));
       } else {
-        ctx.waitUntil((async () => {
-          await tg(env, "sendMessage", { chat_id: chatId, text: `✍️ Konu alındı: ${topic}\nSenaryo yazılıyor...` });
-          await yeniSenaryo(env, chatId, topic);
-        })());
+        ctx.waitUntil(
+          (async () => {
+            await tg(env, "sendMessage", { chat_id: chatId, text: `✍️ Konu alındı: ${topic}\nSenaryo yazılıyor...` });
+            await yeniSenaryo(env, chatId, topic);
+          })()
+        );
       }
-    } else if (body.callback_query?.data?.startsWith("onayla:")) {
-      ctx.waitUntil(onayla(env, body.callback_query));
+    } else if (cq?.data?.startsWith("onayla:")) {
+      ctx.waitUntil(onayla(env, cq));
     }
-
     return new Response("OK");
   },
 };
