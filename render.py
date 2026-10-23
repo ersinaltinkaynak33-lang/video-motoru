@@ -194,7 +194,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font},80,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,2,2,60,60,520,1
+Style: Default,{font},80,&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,8,5,2,60,60,520,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -214,8 +214,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             e = max(e, s + 0.06)
             parts = []
             for j, x in enumerate(ch):
-                if j == k:   # aktif kelime: sarı + pop-in
-                    parts.append("{\\1c&H00E5FF&\\fscx85\\fscy85\\t(0,90,\\fscx112\\fscy112)}"
+                if j == k:   # aktif kelime: sarı + bounce (130% -> 100%)
+                    parts.append("{\\1c&H00E5FF&\\fscx130\\fscy130\\t(0,110,\\fscx100\\fscy100)}"
                                  + x["lab"] + "{\\r}")
                 else:
                     parts.append(x["lab"])
@@ -230,16 +230,45 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 PIXABAY_KEY = os.environ.get("PIXABAY_API_KEY", "")
 
 
-def pixabay_urls(query, limit=6):
+# Pixabay "film" filtresine rağmen sızan sahte/estetik uyumsuz içerik etiketleri (yumuşak ceza)
+BAD_TAGS = {"3d", "render", "cgi", "cartoon", "animation", "animated", "neon", "cyberpunk",
+            "abstract", "futuristic", "hologram", "fantasy", "illustration"}
+
+
+def _stem(w):
+    w = w.lower()
+    return w[:-1] if w.endswith("s") and len(w) > 3 else w
+
+
+def rank_hits(hits, query, avoid):
+    """Pixabay'in çıplak anahtar-kelime sonucunu etiketlerle doğrular.
+    avoid: eşsesli/yanlış anlamı gösteren kelimeler (örn. tablet için pill, capsule) -> etiketlerde geçen sonuç ELENİR."""
+    q = [_stem(w) for w in query.split()]
+    av = {_stem(w) for w in avoid}
+    bad = {_stem(w) for w in BAD_TAGS}
+    scored = []
+    for i, h in enumerate(hits):
+        tags = {_stem(t) for t in re.split(r"[,\s]+", str(h.get("tags", ""))) if t}
+        if tags & av:
+            continue
+        if (h.get("duration") or 99) < 4:
+            continue
+        score = 2 * sum(1 for w in q if w in tags) - 3 * len(tags & bad)
+        scored.append((-score, i, h))
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return [h for _, _, h in scored]
+
+
+def pixabay_urls(query, avoid=(), limit=6):
     if not PIXABAY_KEY:
         return []
     try:
         r = requests.get("https://pixabay.com/api/videos/",
-                         params={"key": PIXABAY_KEY, "q": query[:100],
-                                 "per_page": 12, "safesearch": "true"},
+                         params={"key": PIXABAY_KEY, "q": query[:100], "per_page": 30,
+                                 "video_type": "film", "safesearch": "true"},
                          timeout=15)
         r.raise_for_status()
-        hits = r.json().get("hits", [])
+        hits = rank_hits(r.json().get("hits", []), query, avoid)
     except Exception as e:
         log(f"Pixabay '{query}' hata: {type(e).__name__}")
         return []
@@ -295,14 +324,14 @@ def query_variants(q):
     if len(w) > 2:
         out.append(" ".join(w[:2]))
     if len(w) > 1:
-        out.append(w[-1])
+        out.append(w[0])
     return list(dict.fromkeys(out))
 
 
-def get_clips(idx, query, need, mdir):
+def get_clips(idx, query, avoid, need, mdir):
     got, seen = [], set()
     for qv in query_variants(query):
-        for url in pixabay_urls(qv):
+        for url in pixabay_urls(qv, avoid):
             if url in seen:
                 continue
             seen.add(url)
@@ -320,7 +349,8 @@ def get_clips(idx, query, need, mdir):
 def load_scenes(payload):
     sc = payload.get("scenes")
     if sc:
-        return [{"text": s["text"].strip(), "query": s["query"].strip()} for s in sc if s.get("text")]
+        return [{"text": s["text"].strip(), "query": s["query"].strip(), "avoid": list(s.get("avoid", []))}
+                for s in sc if s.get("text")]
     # eski format yedeği: cümleleri sahnelere orantılı dağıt
     script = payload.get("video_script", "")
     sents = [x.strip() for x in re.split(r"(?<=[.!?…])\s+", script) if x.strip()]
@@ -351,7 +381,7 @@ def make_segment(clip, off, frames, out):
     # kaynak klip kesimden kısaysa son kare çoğaltılır (tpad süresi kesim uzunluğundan büyük olmalı)
     pad = frames / FPS + 1
     vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,"
-          f"fps={FPS},tpad=stop_mode=clone:stop_duration={pad:.3f},format=yuv420p")
+          f"fps={FPS},eq=contrast=1.05:saturation=1.06,tpad=stop_mode=clone:stop_duration={pad:.3f},format=yuv420p")
     run(["ffmpeg", "-y", "-v", "error", "-ss", f"{off:.3f}", "-i", clip, "-vf", vf,
          "-frames:v", frames, "-an", "-c:v", "libx264", "-preset", "veryfast",
          "-crf", "18", "-r", FPS, out])
@@ -373,9 +403,9 @@ def build_video_track(scenes, spans, total, work):
 
     clips_by_scene, pool = {}, []
     for si, sc in enumerate(scenes):
-        need = min(3, sum(1 for p in plan if p[0] == si))
+        need = min(4, sum(1 for p in plan if p[0] == si))
         log(f"Sahne {si + 1}/{len(scenes)}: '{sc['query']}' ({need} klip)")
-        clips = get_clips(si, sc["query"], need, mdir)
+        clips = get_clips(si, sc["query"], sc.get("avoid", []), need, mdir)
         if not clips:
             log("  video bulunamadı, havuzdan alınacak")
         clips_by_scene[si] = clips
