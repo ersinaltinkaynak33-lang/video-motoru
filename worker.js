@@ -18,8 +18,8 @@ export default {
         });
 
         try {
-          // Güncel API sürümü (v1beta) ve geçerli model (gemini-1.5-flash)
-          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${env.GEMINI_KEY}`;
+          // Güncel API sürümü (v1beta) ve geçerli model (gemini-2.5-flash)
+          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_KEY}`;
           
           const geminiRes = await fetch(apiUrl, {
             method: "POST",
