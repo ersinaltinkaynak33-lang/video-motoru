@@ -32,6 +32,26 @@ KURALLAR:
 7. EŞSESLİLİK KONTROLÜ: Her query için kendine sor: "Stok video sitesi bu kelimeyi başka hangi anlamda anlayabilir?" Birden fazla anlamı olan kelimeyi (örn. tablet=hap, market=pazar yeri, trader=sokak satıcısı, mouse=fare hayvanı, bank=nehir kıyısı, cell=hapishane hücresi, chip=cips, crane=turna kuşu, cloud=bulut) ya bağlam kelimesiyle netleştir ("doctor digital screen", "stock exchange trading floor") ya da hiç kullanma.
 8. "avoid": Her sahne için, yanlış anlamı gösterecek 2-5 İNGİLİZCE tek kelime (küçük harf). Örn. query "doctor digital screen" için ["pill","capsule","medicine","effervescent"]. Bu kelimeler etiketlerinde geçen videolar elenecek.`;
 
+// Biçim sapmalarını reddetme, düzelt: "Drone-view of farm!" -> "drone view of farm" (en fazla 4 kelime)
+const kelimeler = (v) =>
+  String(v ?? "")
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+function temizle(d) {
+  if (!Array.isArray(d?.cumleler)) return d;
+  for (const x of d.cumleler) {
+    if (!x || typeof x !== "object") continue;
+    x.query = kelimeler(x.query).slice(0, 4).join(" ");
+    const ham = Array.isArray(x.avoid) ? x.avoid : typeof x.avoid === "string" ? [x.avoid] : [];
+    x.avoid = [...new Set(ham.flatMap(kelimeler))].slice(0, 5);
+  }
+  return d;
+}
+
 function dogrula(d) {
   const err = [];
   if (!d || typeof d.baslik !== "string" || !d.baslik.trim()) err.push("baslik eksik");
@@ -42,10 +62,8 @@ function dogrula(d) {
     const q = typeof x?.query === "string" ? x.query.trim() : "";
     if (!m) err.push(`${i + 1}. metin boş`);
     if (/[()\[\]"“”#]|sahne\s*\d|kesit/i.test(m)) err.push(`${i + 1}. metinde yasak karakter/ifade var`);
-    if (!/^[A-Za-z]+( [A-Za-z]+){1,3}$/.test(q)) err.push(`${i + 1}. query İngilizce 2-4 kelime olmalı`);
-    const av = x?.avoid;
-    if (!Array.isArray(av) || av.length < 2 || av.length > 6 || !av.every((w) => typeof w === "string" && /^[a-z]+$/.test(w)))
-      err.push(`${i + 1}. avoid 2-5 küçük harfli İngilizce kelime olmalı`);
+    if (!q) err.push(`${i + 1}. query boş`);
+    if (!Array.isArray(x?.avoid) || x.avoid.length < 1) err.push(`${i + 1}. avoid boş (query="${q}")`);
   });
   const wc = c.map((x) => String(x?.metin || "").trim().split(/\s+/).filter(Boolean).length);
   const toplam = wc.reduce((a, b) => a + b, 0);
@@ -88,10 +106,11 @@ async function senaryoUret(env, topic) {
   let sonHata = "";
   for (let deneme = 0; deneme < 2; deneme++) {
     try {
-      const d = await groqTek(env, messages);
+      const d = temizle(await groqTek(env, messages));
       const err = dogrula(d);
       if (!err.length) return d;
       sonHata = err.slice(0, 4).join("; ");
+      console.log("Doğrulama reddi:", sonHata);
       messages.push({ role: "assistant", content: JSON.stringify(d) });
       messages.push({ role: "user", content: `Reddedildi: ${sonHata}. Kuralları düzelterek JSON'u baştan yaz.` });
     } catch (e) {
