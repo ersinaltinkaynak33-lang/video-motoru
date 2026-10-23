@@ -1,0 +1,64 @@
+name: Video Uretimi
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: 'Video verileri'
+        required: true
+
+jobs:
+  build-and-render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          
+      - name: Sistem Bağımlılıklarını Kur
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+          
+      - name: MoneyPrinterTurbo İndir ve Kur
+        run: |
+          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git
+          cd MoneyPrinterTurbo
+          pip install -r requirements.txt
+          echo "[app]" > config.toml
+          echo "video_source = \"pixabay\"" >> config.toml
+          echo "pixabay_api_keys = [\"${{ secrets.PIXABAY_API_KEY }}\"]" >> config.toml
+          echo "video_materials = [\"video\"]" >> config.toml
+          echo "subtitle_provider = \"edge\"" >> config.toml
+          
+      - name: Videoyu Render Et ve Telegram'a Gönder
+        env:
+          PAYLOAD: ${{ github.event.inputs.payload }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.ALLOWED_CHAT_ID }}
+        run: |
+          cd MoneyPrinterTurbo
+          python -c "
+          import requests, json, time, os
+          payload = json.loads(os.environ['PAYLOAD'])
+          
+          import subprocess
+          subprocess.Popen(['uvicorn', 'app.asgi:app', '--host', '0.0.0.0', '--port', '8081'])
+          time.sleep(10)
+          
+          r = requests.post('http://127.0.0.1:8081/api/v1/videos', json=payload)
+          task_id = r.json()['data']['task_id']
+          
+          while True:
+              time.sleep(10)
+              tr = requests.get(f'http://127.0.0.1:8081/api/v1/tasks/{task_id}').json()
+              if tr['data']['state'] == 'completed':
+                  v_path = f'Storage/tasks/{task_id}/final-1.mp4'
+                  with open(v_path, 'rb') as v:
+                      requests.post(f'https://api.telegram.org/bot{os.environ[\"TG_TOKEN\"]}/sendVideo', data={'chat_id': os.environ['CHAT_ID'], 'caption': payload['video_subject']}, files={'video': v})
+                  break
+              elif tr['data']['state'] == 'failed':
+                  requests.post(f'https://api.telegram.org/bot{os.environ[\"TG_TOKEN\"]}/sendMessage', json={'chat_id': os.environ['CHAT_ID'], 'text': '❌ Video üretimi başarısız oldu.'})
+                  break
+          "
