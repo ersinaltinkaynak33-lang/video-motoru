@@ -7,21 +7,19 @@ on:
         description: 'Video verileri (JSON)'
         required: true
 
-# Aynı anda 1 çalışan + en fazla 1 bekleyen iş. Fazlası iptal edilir (ucuz bir hız sınırı).
 concurrency:
   group: video-uret
   cancel-in-progress: false
 
 env:
-  # Tag/branch değil, commit SHA'sına sabitle: upstream kırılırsa gece yarısı bot ölmesin.
   MPT_REF: f063a2b95e0f71f60891ac1c7b53add684bc6a46
 
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 25   # 360 değil! Takılan iş 6 saat dakika yakmasın.
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4          # render.py bu repoda
+      - uses: actions/checkout@v4
 
       - uses: actions/checkout@v4
         with:
@@ -47,11 +45,12 @@ jobs:
             sudo apt-get install -y --no-install-recommends ffmpeg
           fi
           ffmpeg -version | head -1
-          ffprobe -version | head -1
 
-      - name: Python bağımlılıkları (ilk koşuda cache boş)
+      - name: Python bağımlılıkları
         timeout-minutes: 8
-        run: pip install -r mpt/requirements.txt
+        run: |
+          pip install -r mpt/requirements.txt
+          pip install edge-tts
 
       - name: Render + Telegram
         working-directory: mpt
