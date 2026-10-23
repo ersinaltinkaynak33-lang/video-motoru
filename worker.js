@@ -52,7 +52,6 @@ async function onayla(env, cq) {
     return tg(env, "answerCallbackQuery", { callback_query_id: cq.id, text: "⏳ Süresi dolmuş, tekrar /yeni deneyin." });
   }
 
-  // Çift tıklama koruması: Veriyi hemen KV'den sil
   await env.KV.delete(`s:${id}`);
 
   const d = JSON.parse(raw);
@@ -84,16 +83,11 @@ export default {
     if (request.method !== "POST" || url.pathname !== "/webhook")
       return new Response("Bot Aktif");
 
-    // GÜVENLİK KALKANI: Webhook Secret Kontrolü
-    if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) {
-      return new Response("Forbidden", { status: 403 });
-    }
-
     const body = await request.json();
     const chatId = body.message?.chat.id ?? body.callback_query?.message.chat.id;
     const fromId = body.message?.from?.id ?? body.callback_query?.from?.id;
 
-    // Sadece senin kullanıcı ID'ne izin ver (Spam koruması)
+    // Sadece senin kullanıcı ID'ne izin ver (Spam koruması devam ediyor)
     if (String(fromId) !== env.ALLOWED_USER_ID) {
         return new Response("Yetkisiz kullanıcı", { status: 403 });
     }
