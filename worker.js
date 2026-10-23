@@ -18,32 +18,38 @@ export default {
         });
 
         try {
-          // Güncel API sürümü (v1beta) ve geçerli model (gemini-2.5-flash)
-          const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${env.GEMINI_KEY}`;
+          // GROQ API (Llama 3.3 70B) Kullanımı
+          const apiUrl = "https://api.groq.com/openai/v1/chat/completions";
           
-          const geminiRes = await fetch(apiUrl, {
+          const groqRes = await fetch(apiUrl, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { 
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${env.GROQ_API_KEY}` // Cloudflare'deki Groq anahtarını kullanır
+            },
             body: JSON.stringify({ 
-              contents: [{ 
-                role: "user", 
-                parts: [{ 
-                  text: `Konu: ${topic}. Kısa dikey video senaryosu yaz. SADECE JSON dön: {"baslik":"...", "senaryo":"...", "gorseller":["terim 1", "terim 2"]}` 
-                }] 
-              }] 
+              model: "llama-3.3-70b-versatile", 
+              response_format: { "type": "json_object" }, // JSON formatını garantiler
+              messages: [
+                { role: "system", content: "Sen kısa dikey videolar için senaryo yazan bir yazarsın. SADECE geçerli bir JSON döndür. Başka hiçbir metin yazma." },
+                { role: "user", content: `Konu: ${topic}. Kısa dikey video senaryosu yaz. SADECE şu JSON formatında dön: {"baslik":"...", "senaryo":"...", "gorseller":["terim 1", "terim 2"]}` }
+              ],
+              temperature: 0.7
             })
           });
           
-          const geminiData = await geminiRes.json();
+          const groqData = await groqRes.json();
           
           // API'den gelen hatayı kontrol et
-          if (geminiData.error) {
-              throw new Error(geminiData.error.message);
+          if (groqData.error) {
+              throw new Error(groqData.error.message);
           }
           
-          if (geminiData.candidates) {
-              const text = geminiData.candidates[0].content.parts[0].text;
-              const data = JSON.parse(text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1));
+          if (groqData.choices && groqData.choices[0].message.content) {
+              const text = groqData.choices[0].message.content;
+              
+              // Gelen metni JSON olarak ayrıştır
+              const data = JSON.parse(text); 
               
               // Senaryoyu ve onay butonunu gönder
               await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
@@ -56,7 +62,7 @@ export default {
                 })
               });
           } else {
-              throw new Error("Geçersiz yanıt formatı.");
+              throw new Error("Groq API geçerli bir yanıt vermedi.");
           }
         } catch (err) {
           // Hata olursa doğrudan Telegram'a yaz
