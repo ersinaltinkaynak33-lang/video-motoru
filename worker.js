@@ -7,7 +7,7 @@
 //        -d url=https://<worker-adresi>/webhook -d secret_token=<WEBHOOK_SECRET>
 
 const N_SCENES = 10;
-const GROQ_ATTEMPT_MS = 11000; // 2 deneme + Telegram çağrıları < 30 sn (ctx.waitUntil sınırı)
+const GROQ_ATTEMPT_MS = 15000; // 2 deneme + Telegram çağrıları < 30 sn sınırı için biraz artırıldı
 
 const tg = (env, method, payload) =>
   fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`, {
@@ -16,10 +16,8 @@ const tg = (env, method, payload) =>
     body: JSON.stringify(payload),
   }).catch((e) => console.error("Telegram hatası:", method, e.message));
 
-// NOT: Estetik son ek ("cinematic realistic 4k") Pixabay isteğinin atıldığı yerde, render.py'de eklenir.
-// Worker bu kelimeleri query'den SİLER (temizle) ki iki kez eklenmesin.
 const SYSTEM_PROMPT = `Sen Türkiye'deki TikTok/Reels/Shorts için konuşma metni yazan, iddialı ama dürüst bir kısa video yazarısın. Aynı zamanda sıfır toleranslı bir stok-video sorgu mühendisisin.
-SADECE geçerli JSON döndür. Şema (tam ${N_SCENES} eleman):
+SADECE geçerli JSON döndür. Başka hiçbir metin, açıklama ya da markdown kodu yazma. Şema (tam ${N_SCENES} eleman):
 {"baslik":"...","cumleler":[{"metin":"...","query":"...","alt":"...","avoid":["..."]}]}
 
 Her eleman bir cümle ve o cümle okunurken ekranda görünecek sahneyi temsil eder.
@@ -60,10 +58,8 @@ const DOGA = new Set([
   "sky", "clouds", "sunset", "sunrise", "fire", "fireplace", "flame", "flames", "snow", "fog", "mist",
   "smoke", "wind", "turbine", "windmill", "wildlife", "animal", "animals", "bird", "birds", "fox", "deer",
 ]);
-// Konu zaten bunlardan biriyle ilgiliyse doğa yasağı uygulanmaz.
 const DOGA_KONU = /doğa|orman|deniz|okyanus|dağ|hayvan|manzara|gökyüz|tarım|çiftlik|iklim|çevre|bitki|kuş|balık|seyahat|gezi|tatil|köy|enerji|rüzgar|güneş|yangın|ateş/i;
 
-// Biçim sapmalarını reddetme, düzelt: "Drone-view of farm!" -> "drone view of farm" (en fazla 4 kelime)
 const kelimeler = (v) =>
   String(v ?? "")
     .toLowerCase()
@@ -94,7 +90,7 @@ function temizle(d) {
     if (!x || typeof x !== "object") continue;
     for (const alan of ["query", "alt"]) {
       x[alan] = kelimeler(x[alan])
-        .filter((w) => !ESTETIK.has(w)) // estetik eki render.py ekler; burada ASLA kalmasın
+        .filter((w) => !ESTETIK.has(w))
         .slice(0, 4)
         .join(" ");
     }
@@ -141,11 +137,10 @@ function dogrula(d, topic = "") {
 }
 
 async function groqTek(env, messages) {
-  // DÜZELTME: Model adı llama-3.3-70b-versatile olarak değiştirildi, Groq'a özel olmayan parametreler silindi.
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.GROQ_API_KEY}` },
-      body: JSON.stringify({
+    body: JSON.stringify({
       model: "openai/gpt-oss-120b",
       temperature: 0.7,
       max_tokens: 4000,
@@ -154,18 +149,20 @@ async function groqTek(env, messages) {
     signal: AbortSignal.timeout(GROQ_ATTEMPT_MS),
   });
   if (!res.ok) {
-    const errorText = await res.text();
-    throw new Error(`Groq HTTP ${res.status}: ${errorText.slice(0, 100)}`);
+    const errText = await res.text();
+    throw new Error(`Groq HTTP ${res.status}: ${errText.slice(0, 200)}`);
   }
   const j = await res.json();
   if (j.error) throw new Error(j.error.message);
   let text = j.choices?.[0]?.message?.content;
-  if (!text || !text.trim()) throw new Error("Groq boş yanıt döndürdü");
+  if (!text || !text.trim()) {
+    console.log("Groq boş yanıt. Finish reason:", j.choices?.[0]?.finish_reason);
+    throw new Error(`Groq boş yanıt döndürdü (Finish reason: ${j.choices?.[0]?.finish_reason || 'bilinmiyor'})`);
+  }
   text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
   return JSON.parse(text);
 }
 
-// En fazla 2 deneme; ikincide ilk denemenin hataları modele geri bildirim olarak verilir.
 async function senaryoUret(env, topic) {
   const messages = [
     { role: "system", content: SYSTEM_PROMPT },
@@ -233,7 +230,6 @@ async function onayla(env, cq) {
   );
 
   if (gh.status === 204) {
-    // çift tıklamayı engelle: butonu kaldır
     if (cq.message) {
       await tg(env, "editMessageReplyMarkup", {
         chat_id: cq.message.chat.id,
@@ -243,7 +239,6 @@ async function onayla(env, cq) {
     }
     return answer("✅ Onaylandı! Video üretimi başladı.");
   }
-  // başarısızsa senaryo kaybolmasın
   await env.KV.put(key, raw, { expirationTtl: 3600 });
   const detay = (await gh.text()).slice(0, 150);
   return answer(`❌ GitHub ${gh.status}: ${detay}`.slice(0, 190));
@@ -254,7 +249,6 @@ export default {
     const url = new URL(request.url);
     if (request.method !== "POST" || url.pathname !== "/webhook") return new Response("Bot Aktif");
 
-    // Telegram update'leri imzasız gelir; from.id kolayca taklit edilir. Gizli başlık şart.
     if (!env.WEBHOOK_SECRET || request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== env.WEBHOOK_SECRET) {
       return new Response("Yetkisiz", { status: 401 });
     }
