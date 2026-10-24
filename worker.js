@@ -7,7 +7,7 @@
 //        -d url=https://<worker-adresi>/webhook -d secret_token=<WEBHOOK_SECRET>
 
 const N_SCENES = 10;
-const GROQ_ATTEMPT_MS = 6000; // Her deneme max 6 sn — Cloudflare ücretsiz plan 10sn request timeout'unun altında güvenli marj (2 deneme = ~12sn toplam)
+const GROQ_ATTEMPT_MS = 9000; // Her deneme max 9 sn — Cloudflare ücretsiz plan 10sn request timeout'unun altında güvenli marj (2 deneme = ~18sn toplam)
 
 const tg = (env, method, payload) =>
   fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`, {
@@ -137,30 +137,42 @@ function dogrula(d, topic = "") {
 }
 
 async function groqTek(env, messages) {
-  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.GROQ_API_KEY}` },
-    body: JSON.stringify({
-      model: "openai/gpt-oss-120b",
-      temperature: 0.7,
-      max_tokens: 4000,
-      messages,
-    }),
-    signal: AbortSignal.timeout(GROQ_ATTEMPT_MS),
-  });
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Groq HTTP ${res.status}: ${errText.slice(0, 200)}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), GROQ_ATTEMPT_MS);
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.GROQ_API_KEY}` },
+      body: JSON.stringify({
+        model: "openai/gpt-oss-120b",
+        temperature: 0.7,
+        max_tokens: 4000,
+        messages,
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Groq HTTP ${res.status}: ${errText.slice(0, 200)}`);
+    }
+    const j = await res.json();
+    if (j.error) throw new Error(j.error.message);
+    let text = j.choices?.[0]?.message?.content;
+    if (!text || !text.trim()) {
+      console.log("Groq boş yanıt. Finish reason:", j.choices?.[0]?.finish_reason);
+      throw new Error(`Groq boş yanıt döndürdü (Finish reason: ${j.choices?.[0]?.finish_reason || 'bilinmiyor'})`);
+    }
+    text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+    return JSON.parse(text);
+  } finally {
+    clearTimeout(timeoutId);
+  } catch (e) {
+    if (e.name === "AbortError") {
+      throw new Error(`Groq yanıtı ${GROQ_ATTEMPT_MS} saniyede alınamadı (zaman aşımı)`);
+    }
+    throw e;
   }
-  const j = await res.json();
-  if (j.error) throw new Error(j.error.message);
-  let text = j.choices?.[0]?.message?.content;
-  if (!text || !text.trim()) {
-    console.log("Groq boş yanıt. Finish reason:", j.choices?.[0]?.finish_reason);
-    throw new Error(`Groq boş yanıt döndürdü (Finish reason: ${j.choices?.[0]?.finish_reason || 'bilinmiyor'})`);
-  }
-  text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-  return JSON.parse(text);
 }
 
 async function senaryoUret(env, topic) {
