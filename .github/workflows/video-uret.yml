@@ -13,7 +13,7 @@ on:
 
 jobs:
   render:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       PYTHONUNBUFFERED: "1"   # log sırası bozulmasın (eski logda Traceback, çıktılardan ÖNCE görünüyordu)
@@ -34,7 +34,7 @@ jobs:
       - name: Bağımlılıklar (MPT yok; yalnızca 2 paket)
         timeout-minutes: 3
         run: |
-          pip install edge-tts==7.3.1 requests==2.33.1
+          pip install "edge-tts>=7.0.0,<8" "requests>=2.31"
           # Altyazı için Türkçe karakter destekli, deterministik font
           [ -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf ] || \
             sudo apt-get install -y --no-install-recommends fonts-dejavu-core
