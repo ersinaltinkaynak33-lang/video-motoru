@@ -3,11 +3,11 @@
 // Gerekli secret'lar (wrangler secret put ...):
 //   TELEGRAM_TOKEN, GROQ_API_KEY, GITHUB_TOKEN, WEBHOOK_SECRET
 // Webhook'u şu şekilde kaydedin (secret_token ŞART, yoksa herkes sahte update gönderebilir):
-//   curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+//   curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \\
 //        -d url=https://<worker-adresi>/webhook -d secret_token=<WEBHOOK_SECRET>
 
 const N_SCENES = 10;
-const GROQ_ATTEMPT_MS = 15000; // 2 deneme + Telegram çağrıları < 30 sn sınırı için biraz artırıldı
+const GROQ_ATTEMPT_MS = 6000; // Her deneme max 6 sn — Cloudflare ücretsiz plan 10sn request timeout'unun altında güvenli marj (2 deneme = ~12sn toplam)
 
 const tg = (env, method, payload) =>
   fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`, {
@@ -64,8 +64,8 @@ const kelimeler = (v) =>
   String(v ?? "")
     .toLowerCase()
     .replace(/['’]/g, "")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
+    .replace(/[^a-z0-9\\s]/g, " ")
+    .split(/\\s+/)
     .filter(Boolean);
 
 function queryYasakli(q, dogaYasak = false) {
@@ -110,7 +110,7 @@ function dogrula(d, topic = "") {
     const m = typeof x?.metin === "string" ? x.metin.trim() : "";
     const q = typeof x?.query === "string" ? x.query.trim() : "";
     if (!m) err.push(`${i + 1}. metin boş`);
-    if (/[()\[\]"“”#]|sahne\s*\d|kesit/i.test(m)) err.push(`${i + 1}. metinde yasak karakter/ifade var`);
+    if (/[()\[\]\""“”#]|sahne\s*\d|kesit/i.test(m)) err.push(`${i + 1}. metinde yasak karakter/ifade var`);
     const a = typeof x?.alt === "string" ? x.alt.trim() : "";
     if (!q) err.push(`${i + 1}. query boş`);
     else {
@@ -127,7 +127,7 @@ function dogrula(d, topic = "") {
   });
   const qs = c.flatMap((x) => [String(x?.query || "").trim(), String(x?.alt || "").trim()]).filter(Boolean);
   if (new Set(qs).size !== qs.length) err.push("tekrar eden query/alt var, hepsi farklı olmalı");
-  const wc = c.map((x) => String(x?.metin || "").trim().split(/\s+/).filter(Boolean).length);
+  const wc = c.map((x) => String(x?.metin || "").trim().split(/\\s+/).filter(Boolean).length);
   const toplam = wc.reduce((a, b) => a + b, 0);
   if (c.length && (toplam < 65 || toplam > 115)) err.push(`toplam ${toplam} kelime (80-100 olmalı)`);
   if (wc[0] > 10) err.push("ilk cümle 8 kelimeyi aşıyor");
