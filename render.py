@@ -227,8 +227,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             e = max(e, s + 0.06)
             parts = []
             for j, x in enumerate(ch):
-                if j == k:   # aktif kelime: sarı + bounce (130% -> 100%)
-                    parts.append("{\\1c&H00E5FF&\\fscx130\\fscy130\\t(0,110,\\fscx100\\fscy100)}"
+                if j == k:   # aktif kelime: sarı + bounce (140% -> 100%, 170 ms)
+                    parts.append("{\\1c&H00E5FF&\\fscx140\\fscy140\\t(0,170,\\fscx100\\fscy100)}"
                                  + x["lab"] + "{\\r}")
                 else:
                     parts.append(x["lab"])
@@ -251,9 +251,12 @@ BAD_TAGS = {"3d", "render", "cgi", "cartoon", "animation", "animated", "neon", "
             "abstract", "futuristic", "hologram", "fantasy", "illustration"}
 
 # Sahne için hiç benzersiz klip bulunamazsa son çare (somut, jenerik görüntüler)
-FALLBACK_QUERIES = ["city street walking", "forest sunlight trees", "ocean waves beach",
-                    "office desk laptop", "mountain road driving", "people walking crosswalk",
-                    "coffee cup table", "sunset sky clouds"]
+# DOĞA/MANZARA YOK: konu ev/teknoloji iken orman-okyanus-gün batımı görünmesin.
+FALLBACK_QUERIES = ["living room interior", "kitchen counter hands", "person using smartphone",
+                    "office desk laptop", "city street walking", "supermarket shopping aisle",
+                    "coffee cup table", "people walking crosswalk"]
+GENERIC_WORDS = {"of", "in", "on", "at", "to", "with", "and", "the", "a", "an", "holding", "using",
+                 "close", "up", "view", "top"}
 
 _PX_CACHE = {}
 
@@ -272,14 +275,19 @@ def styled(q):
 def rank_hits(hits, query, avoid):
     """Pixabay'in çıplak anahtar-kelime sonucunu etiketlerle doğrular.
     avoid: eşsesli/yanlış anlamı gösteren kelimeler (örn. tablet için pill, capsule) -> etiketlerde geçen sonuç ELENİR.
-    BAD_TAGS (3D/CGI/neon...) etiketli sonuçlar da ELENİR."""
+    BAD_TAGS (3D/CGI/neon...) etiketli sonuçlar da ELENİR.
+    ALAKA KAPISI: etiketlerinde sorgunun en az bir içerik kelimesi geçmeyen klip ELENİR
+    (Pixabay gevşek eşleşmede 'cinematic' vb. etiketli doğa klipleri döndürebilir)."""
     q = [_stem(w) for w in query.split() if w.lower() not in STYLE_WORDS]
+    core = {w for w in q if w not in GENERIC_WORDS}      # alaka kapısı için içerik kelimeleri
     av = {_stem(w) for w in avoid}
     bad = {_stem(w) for w in BAD_TAGS}
     scored = []
     for i, h in enumerate(hits):
         tags = {_stem(t) for t in re.split(r"[,\s]+", str(h.get("tags", ""))) if t}
         if tags & av or tags & bad:
+            continue
+        if core and not (core & tags):                   # ALAKA KAPISI: etiketlerde sorgu kelimesi yoksa ELE
             continue
         if (h.get("duration") or 99) < 4:
             continue
@@ -390,10 +398,21 @@ def query_variants(q):
     return list(dict.fromkeys(out))
 
 
-def get_clips(idx, query, avoid, need, mdir, used_video_ids):
+def scene_queries(query, alt=""):
+    """Sıra: tam sorgu, alternatif sorgu, sonra ikisinin 2 kelimelik daraltmaları."""
+    out = [query]
+    if alt:
+        out.append(alt)
+    out += query_variants(query)[1:]
+    if alt:
+        out += query_variants(alt)[1:]
+    return list(dict.fromkeys(q for q in out if q))
+
+
+def get_clips(idx, query, avoid, need, mdir, used_video_ids, alt=""):
     """Sahne için en fazla `need` BENZERSİZ klip indirir. used_video_ids tüm video boyunca ortaktır."""
     got = []
-    for qv in query_variants(query):
+    for qv in scene_queries(query, alt):
         for vid, url in pixabay_candidates(qv, avoid, used_video_ids):
             if vid in used_video_ids or url in used_video_ids:
                 log(f"  atlandı (tekrar): {vid}")
@@ -415,7 +434,8 @@ def get_clips(idx, query, avoid, need, mdir, used_video_ids):
 def load_scenes(payload):
     sc = payload.get("scenes")
     if sc:
-        return [{"text": s["text"].strip(), "query": s["query"].strip(), "avoid": list(s.get("avoid", []))}
+        return [{"text": s["text"].strip(), "query": s["query"].strip(),
+                 "alt": str(s.get("alt") or "").strip(), "avoid": list(s.get("avoid", []))}
                 for s in sc if s.get("text")]
     # eski format yedeği: cümleleri sahnelere orantılı dağıt
     script = payload.get("video_script", "")
@@ -465,7 +485,7 @@ def build_video_track(scenes, spans, total, work):
     for si, (sc, (a, b)) in enumerate(zip(scenes, spans)):
         want = min(4, max(1, int(round((b - a) / TARGET_CUT))))
         log(f"Sahne {si + 1}/{len(scenes)}: '{sc['query']}' ({want} klip)")
-        clips = get_clips(si, sc["query"], sc.get("avoid", []), want, mdir, used_video_ids)
+        clips = get_clips(si, sc["query"], sc.get("avoid", []), want, mdir, used_video_ids, sc.get("alt", ""))
         tries = 0
         while not clips and tries < len(FALLBACK_QUERIES):
             fq = FALLBACK_QUERIES[fb % len(FALLBACK_QUERIES)]
