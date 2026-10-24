@@ -145,11 +145,10 @@ async function groqTek(env, messages) {
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.GROQ_API_KEY}` },
-    body: JSON.stringify({
+      body: JSON.stringify({
       model: "openai/gpt-oss-120b",
       temperature: 0.7,
-      max_tokens: 3000,
-      response_format: { type: "json_object" },
+      max_tokens: 4000,
       messages,
     }),
     signal: AbortSignal.timeout(GROQ_ATTEMPT_MS),
