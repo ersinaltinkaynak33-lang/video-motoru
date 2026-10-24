@@ -6,7 +6,9 @@ Akış:
   1. Edge-TTS sesi üretir (WordBoundary -> SentenceBoundary -> orantılı tahmin, 3 kademeli yedek).
   2. Ses loudnorm ile iki geçişte -14 LUFS'a normalize edilir.
   3. Her cümleye ait sahne, o cümlenin konuşulduğu süre aralığına yerleştirilir (ses-görüntü senkronu).
-  4. Her sahne ~2.4 sn'lik hızlı kesimlere bölünür, 1080x1920'ye kırpılır.
+  4. Her sahne ~2 sn'lik hızlı kesimlere bölünür, 1080x1920'ye kırpılır.
+     - Aynı Pixabay klibi (ID veya URL) bir video içinde ASLA iki kez kullanılmaz (used_video_ids).
+     - Her Pixabay sorgusuna "cinematic realistic 4k" eklenir; 3D/CGI/neon etiketli klipler elenir.
   5. Tek geçişte ASS altyazı yakılır + normalize ses eklenir -> Telegram.
 """
 import asyncio
@@ -102,11 +104,22 @@ def tokens(s):
 
 
 def build_words(kind, events, text, total):
-    """Her durumda [{'t','s','e'}] kelime listesi üretir."""
+    """Her durumda [{'t','s','e'}] kelime listesi üretir. Metin doluysa liste ASLA boş dönmez:
+    WordBoundary eksik/seyrek gelirse cümle zamanlarına, o da yoksa toplam süreye orantılı dağıtılır."""
+    n_text = len(tokens(text))
     if kind == "word":
-        return [w for w in events if w["t"].strip()]
-    spans = ([(e["t"], e["s"], e["e"]) for e in events]
-             if kind == "sentence" else [(text, 0.0, total)])
+        ws = [w for w in events if w["t"].strip()]
+        if ws and len(ws) >= 0.6 * n_text:
+            return ws
+        log(f"    WordBoundary seyrek ({len(ws)}/{n_text}); orantılı zamanlamaya geçildi.")
+        kind = "none"
+    spans = ([(e["t"], e["s"], e["e"]) for e in events if e["t"].strip()]
+             if kind == "sentence" else [])
+    if kind == "sentence" and sum(len(tokens(t)) for t, _, _ in spans) < 0.6 * n_text:
+        log("    SentenceBoundary eksik; orantılı zamanlamaya geçildi.")
+        spans = []
+    if not spans:
+        spans = [(text, 0.0, total)]
     out = []
     for txt, s, e in spans:
         toks = tokens(txt)
@@ -229,10 +242,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 # --------------------------------------------------------------------------- #
 PIXABAY_KEY = os.environ.get("PIXABAY_API_KEY", "")
 
+# KURAL 3 (estetik): her Pixabay sorgusunun sonuna eklenir.
+STYLE_SUFFIX = "cinematic realistic 4k"
+STYLE_WORDS = {"cinematic", "realistic", "4k", "hd", "uhd", "8k"}
 
-# Pixabay "film" filtresine rağmen sızan sahte/estetik uyumsuz içerik etiketleri (yumuşak ceza)
+# Pixabay "film" filtresine rağmen sızan sahte/estetik uyumsuz içerik etiketleri -> bu etiketli klipler ELENİR
 BAD_TAGS = {"3d", "render", "cgi", "cartoon", "animation", "animated", "neon", "cyberpunk",
             "abstract", "futuristic", "hologram", "fantasy", "illustration"}
+
+# Sahne için hiç benzersiz klip bulunamazsa son çare (somut, jenerik görüntüler)
+FALLBACK_QUERIES = ["city street walking", "forest sunlight trees", "ocean waves beach",
+                    "office desk laptop", "mountain road driving", "people walking crosswalk",
+                    "coffee cup table", "sunset sky clouds"]
+
+_PX_CACHE = {}
 
 
 def _stem(w):
@@ -240,52 +263,91 @@ def _stem(w):
     return w[:-1] if w.endswith("s") and len(w) > 3 else w
 
 
+def styled(q):
+    """Sorguya estetik son eki ekler (idempotent: önceden varsa tekrar eklemez)."""
+    base = " ".join(w for w in q.split() if w.lower() not in STYLE_WORDS)
+    return f"{base} {STYLE_SUFFIX}"[:100]
+
+
 def rank_hits(hits, query, avoid):
     """Pixabay'in çıplak anahtar-kelime sonucunu etiketlerle doğrular.
-    avoid: eşsesli/yanlış anlamı gösteren kelimeler (örn. tablet için pill, capsule) -> etiketlerde geçen sonuç ELENİR."""
-    q = [_stem(w) for w in query.split()]
+    avoid: eşsesli/yanlış anlamı gösteren kelimeler (örn. tablet için pill, capsule) -> etiketlerde geçen sonuç ELENİR.
+    BAD_TAGS (3D/CGI/neon...) etiketli sonuçlar da ELENİR."""
+    q = [_stem(w) for w in query.split() if w.lower() not in STYLE_WORDS]
     av = {_stem(w) for w in avoid}
     bad = {_stem(w) for w in BAD_TAGS}
     scored = []
     for i, h in enumerate(hits):
         tags = {_stem(t) for t in re.split(r"[,\s]+", str(h.get("tags", ""))) if t}
-        if tags & av:
+        if tags & av or tags & bad:
             continue
         if (h.get("duration") or 99) < 4:
             continue
-        score = 2 * sum(1 for w in q if w in tags) - 3 * len(tags & bad)
+        score = 2 * sum(1 for w in q if w in tags)
         scored.append((-score, i, h))
     scored.sort(key=lambda x: (x[0], x[1]))
     return [h for _, _, h in scored]
 
 
-def pixabay_urls(query, avoid=(), limit=6):
+def pixabay_raw(q):
+    """Ham Pixabay sonucu. Aynı sorgu tek videoda iki kez API'ye gitmez; 429'da bekleyip tekrar dener."""
+    if q in _PX_CACHE:
+        return _PX_CACHE[q]
+    for attempt in range(3):
+        try:
+            r = requests.get("https://pixabay.com/api/videos/",
+                             params={"key": PIXABAY_KEY, "q": q[:100], "per_page": 50,
+                                     "video_type": "film", "safesearch": "true"},
+                             timeout=15)
+            if r.status_code == 429:
+                log(f"  Pixabay hız sınırı, {12 * (attempt + 1)} sn bekleniyor")
+                time.sleep(12 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            hits = r.json().get("hits", [])
+            _PX_CACHE[q] = hits
+            return hits
+        except Exception as e:
+            log(f"  Pixabay '{q}' hata: {type(e).__name__}")
+            time.sleep(1.5)
+    return []
+
+
+def pick_url(h):
+    vs = h.get("videos", {})
+    for name in ("large", "medium", "small"):
+        v = vs.get(name) or {}
+        if v.get("url") and (v.get("size") or 0) <= 35 * 1024 * 1024:
+            return v["url"]
+    return None
+
+
+def pixabay_candidates(query, avoid, used_video_ids, limit=12):
+    """[(video_id, url)] döndürür. used_video_ids içindeki ID/URL ASLA dönmez.
+    Önce estetik ekli sorgu, sonra sade sorgu (estetik ek sonuçları boğarsa diye)."""
     if not PIXABAY_KEY:
         return []
-    try:
-        r = requests.get("https://pixabay.com/api/videos/",
-                         params={"key": PIXABAY_KEY, "q": query[:100], "per_page": 30,
-                                 "video_type": "film", "safesearch": "true"},
-                         timeout=15)
-        r.raise_for_status()
-        hits = rank_hits(r.json().get("hits", []), query, avoid)
-    except Exception as e:
-        log(f"Pixabay '{query}' hata: {type(e).__name__}")
-        return []
-    urls = []
-    for h in hits:
-        vs = h.get("videos", {})
-        pick = None
-        for name in ("large", "medium", "small"):
-            v = vs.get(name) or {}
-            if v.get("url") and (v.get("size") or 0) <= 35 * 1024 * 1024:
-                pick = v["url"]
+    out, seen, skipped = [], set(), set()
+    for q in (styled(query), query):
+        for h in rank_hits(pixabay_raw(q), query, avoid):
+            vid = str(h.get("id", ""))
+            if not vid or vid in seen:
+                continue                                   # pass
+            url = pick_url(h)
+            if vid in used_video_ids or (url and url in used_video_ids):
+                skipped.add(vid)
+                continue                                   # pass: bu video zaten kullanıldı
+            if not url:
+                continue                                   # pass
+            seen.add(vid)
+            out.append((vid, url))
+            if len(out) >= limit:
                 break
-        if pick:
-            urls.append(pick)
-        if len(urls) >= limit:
+        if len(out) >= limit:
             break
-    return urls
+    if skipped:
+        log(f"  atlandı (tekrar): {len(skipped)} kullanılmış klip")
+    return out
 
 
 def valid_video(path):
@@ -319,25 +381,29 @@ def download(url, dest):
 
 
 def query_variants(q):
+    """Tam sorgu, sonra 2 kelimelik daraltmalar. Tek kelimeye ASLA inmez (tek kelime = eşsesli/alakasız sonuç)."""
     w = q.split()
     out = [q]
     if len(w) > 2:
         out.append(" ".join(w[:2]))
-    if len(w) > 1:
-        out.append(w[0])
+        out.append(" ".join(w[-2:]))
     return list(dict.fromkeys(out))
 
 
-def get_clips(idx, query, avoid, need, mdir):
-    got, seen = [], set()
+def get_clips(idx, query, avoid, need, mdir, used_video_ids):
+    """Sahne için en fazla `need` BENZERSİZ klip indirir. used_video_ids tüm video boyunca ortaktır."""
+    got = []
     for qv in query_variants(query):
-        for url in pixabay_urls(qv, avoid):
-            if url in seen:
-                continue
-            seen.add(url)
+        for vid, url in pixabay_candidates(qv, avoid, used_video_ids):
+            if vid in used_video_ids or url in used_video_ids:
+                log(f"  atlandı (tekrar): {vid}")
+                continue                               # pass
+            used_video_ids.add(vid)                    # indirme başarısız olsa bile tekrar denenmez
+            used_video_ids.add(url)
             dest = mdir / f"s{idx:02d}_{len(got)}.mp4"
             if download(url, dest):
                 got.append(dest)
+                log(f"  + {vid}")
             if len(got) >= need:
                 return got
     return got
@@ -358,7 +424,7 @@ def load_scenes(payload):
     groups = [[] for _ in qs]
     for i, s in enumerate(sents):
         groups[min(len(qs) - 1, i * len(qs) // max(1, len(sents)))].append(s)
-    return [{"text": " ".join(g), "query": q} for g, q in zip(groups, qs) if g]
+    return [{"text": " ".join(g), "query": q, "avoid": []} for g, q in zip(groups, qs) if g]
 
 
 def scene_spans(scenes, words, total):
@@ -392,44 +458,41 @@ def build_video_track(scenes, spans, total, work):
     sdir = work / "segments"
     mdir.mkdir(exist_ok=True)
     sdir.mkdir(exist_ok=True)
+    used_video_ids = set()          # TÜM video boyunca ortak: aynı klip (ID/URL) iki kez kullanılamaz
 
-    # kesim planı: global kare sayımı -> toplam süre kareye tam oturur (kayma yok)
-    plan = []
-    for si, (a, b) in enumerate(spans):
-        nc = max(1, int(round((b - a) / TARGET_CUT)))
-        for j in range(nc):
-            plan.append((si, a + (b - a) * j / nc, a + (b - a) * (j + 1) / nc))
-    end_frame_total = int(round(total * FPS))
-
-    clips_by_scene, pool = {}, []
-    for si, sc in enumerate(scenes):
-        need = min(4, sum(1 for p in plan if p[0] == si))
-        log(f"Sahne {si + 1}/{len(scenes)}: '{sc['query']}' ({need} klip)")
-        clips = get_clips(si, sc["query"], sc.get("avoid", []), need, mdir)
+    clips_by_scene = {}
+    fb = 0                          # FALLBACK_QUERIES için dönen sayaç
+    for si, (sc, (a, b)) in enumerate(zip(scenes, spans)):
+        want = min(4, max(1, int(round((b - a) / TARGET_CUT))))
+        log(f"Sahne {si + 1}/{len(scenes)}: '{sc['query']}' ({want} klip)")
+        clips = get_clips(si, sc["query"], sc.get("avoid", []), want, mdir, used_video_ids)
+        tries = 0
+        while not clips and tries < len(FALLBACK_QUERIES):
+            fq = FALLBACK_QUERIES[fb % len(FALLBACK_QUERIES)]
+            fb += 1
+            tries += 1
+            log(f"  video yok, yedek sorgu: '{fq}'")
+            clips = get_clips(si, fq, [], want, mdir, used_video_ids)
         if not clips:
-            log("  video bulunamadı, havuzdan alınacak")
+            raise RuntimeError(f"Sahne {si + 1} için benzersiz video bulunamadı (Pixabay anahtarı/sorgular?)")
         clips_by_scene[si] = clips
-        pool.extend(clips)
-    if not pool:
-        raise RuntimeError("Hiçbir sahne için geçerli video indirilemedi (Pixabay anahtarı/sorgular?)")
 
-    used = {}
-    seg_files = []
-    prev_end_f = 0
-    for pi, (si, a, b) in enumerate(plan):
-        end_f = end_frame_total if pi == len(plan) - 1 else int(round(b * FPS))
+    # Kesim planı: sahne içindeki kesim sayısı = benzersiz klip sayısı -> hiçbir klip tekrar etmez.
+    # Klip az bulunduysa kesimler uzar (tpad kısa klibin son karesini uzatır); sahne süresi değişmez.
+    plan = []                       # (sahne, sahne-içi indeks, bitiş zamanı)
+    for si, (a, b) in enumerate(spans):
+        nc = len(clips_by_scene[si])
+        for j in range(nc):
+            plan.append((si, j, a + (b - a) * (j + 1) / nc))
+
+    end_frame_total = int(round(total * FPS))
+    seg_files, prev_end_f = [], 0
+    for pi, (si, j, t_end) in enumerate(plan):
+        end_f = end_frame_total if pi == len(plan) - 1 else int(round(t_end * FPS))
         frames = max(2, end_f - prev_end_f)
         prev_end_f = end_f
-        clips = clips_by_scene[si] or pool
-        clip = clips[pi % len(clips)]
-        u = used.get(str(clip), 0)
-        used[str(clip)] = u + 1
-        _, cdur = probe(clip)
-        L = frames / FPS
-        avail = max(0.0, cdur - L - 0.1)
-        off = (u * (L + 0.37)) % (avail + 0.01) if avail > 0 else 0.0
         seg = sdir / f"seg_{pi:03d}.mp4"
-        make_segment(clip, off, frames, seg)
+        make_segment(clips_by_scene[si][j], 0.0, frames, seg)
         seg_files.append(seg)
 
     lst = work / "concat.txt"
@@ -437,7 +500,9 @@ def build_video_track(scenes, spans, total, work):
     track = work / "track.mp4"
     run(["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
          "-c", "copy", track])
-    log(f"Görüntü hattı hazır: {len(seg_files)} kesim")
+    n_unique = sum(len(c) for c in clips_by_scene.values())
+    log(f"Görüntü hattı hazır: {len(seg_files)} kesim, {n_unique} benzersiz klip")
+    assert n_unique == len(seg_files), "klip tekrarı tespit edildi"
     return track
 
 
@@ -475,6 +540,8 @@ def build(payload, work):
     if not scenes:
         raise RuntimeError("Payload'da sahne/senaryo yok")
     text = " ".join(s["text"] for s in scenes)
+    if not tokens(text):
+        raise RuntimeError("Senaryo metni boş")
 
     log("1/5 Ses üretiliyor (Edge-TTS)...")
     raw = work / "voice.mp3"
