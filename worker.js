@@ -20,13 +20,13 @@ const tg = (env, method, payload) =>
 // Worker bu kelimeleri query'den SİLER (temizle) ki iki kez eklenmesin.
 const SYSTEM_PROMPT = `Sen Türkiye'deki TikTok/Reels/Shorts için konuşma metni yazan, iddialı ama dürüst bir kısa video yazarısın. Aynı zamanda sıfır toleranslı bir stok-video sorgu mühendisisin.
 SADECE geçerli JSON döndür. Şema (tam ${N_SCENES} eleman):
-{"baslik":"...","cumleler":[{"metin":"...","query":"...","avoid":["..."]}]}
+{"baslik":"...","cumleler":[{"metin":"...","query":"...","alt":"...","avoid":["..."]}]}
 
 Her eleman bir cümle ve o cümle okunurken ekranda görünecek sahneyi temsil eder.
 
 METİN KURALLARI:
 1. "metin": SADECE seslendirmede okunacak tek bir cümle. Zaman damgası, "Sahne", "Kesit", parantez, tırnak işareti, hashtag, emoji, CTA/logo/kamera tarifi YASAK.
-2. KANCA (ilk cümle, en fazla 8 kelime): somut bir sahne, çelişki veya beklenmedik bir iddia. "X ... değiştirecek/dönüştürecek/şekillendirecek" kalıbı, "Merhaba", "Bugün", "Biliyor muydunuz" YASAK.
+2. KANCA (ilk cümle, en fazla 8 kelime): somut bir sahne, çelişki veya beklenmedik ama DOĞRU bir iddia. YASAK klişeler: "devrim yaratacak", "çağ", "gelecek geldi", "hayatımızı değiştirecek", "X ... değiştirecek/dönüştürecek/şekillendirecek", "Merhaba", "Bugün", "Biliyor muydunuz". İyi kanca kalıpları: gündelik bir nesnenin beklenmedik davranışı ("Süpürgeniz odanızın planını çoktan çıkardı."), bir çelişki, somut bir sahne.
 3. KONU DARLIĞI: Konu genişse TEK bir dar açı veya tek bir hikâye seç. Sektör sektör gezen katalog/liste YASAK.
 4. Toplam 80-100 kelime. Her cümle en fazla 12 kelime. Son cümle güçlü bir kapanış.
 5. DOĞRULUK: Emin olmadığın rakam, yıl, şirket olayı, ürün özelliği veya isim UYDURMA.
@@ -38,7 +38,9 @@ ARAMA TERİMİ (query) KURALLARI — İHLAL = REDDEDİLİRSİN:
 9. SOYUT -> SOMUT ÇEVİRİ ÖRNEKLERİ: bütçe -> "calculator coins desk"; şeffaf -> "exam paper teacher"; verimlilik -> "stopwatch desk hands"; sistem -> "server rack cables"; piyasa -> "stock exchange trading floor"; eğitim -> "teacher chalkboard classroom"; sanal laboratuvar -> "scientist microscope laboratory"; güven -> "two people handshake office".
 10. FORMAT: İngilizce, 2-4 kelime, yapı = somut NESNE + EYLEM/ORTAM. Marka/kişi adı YASAK. Her query FARKLI olsun, aynı nesneyi iki sahnede tekrar etme. Estetik kelime ("cinematic", "4k", "realistic", "hd") EKLEME; sistem kendisi ekliyor.
 11. EŞSESLİLİK KONTROLÜ: Her query için kendine sor: "Stok video sitesi bu kelimeyi başka hangi anlamda anlayabilir?" Cevap varsa query'yi bağlamla değiştir.
-12. "avoid": Her sahne için yanlış anlamı gösterecek 2-5 İNGİLİZCE tek kelime (küçük harf). Örn. query "doctor reading xray film" için ["pill","capsule","medicine","effervescent"].`;
+12. "avoid": Her sahne için yanlış anlamı gösterecek 2-5 İNGİLİZCE tek kelime (küçük harf). Örn. query "doctor reading xray film" için ["pill","capsule","medicine","effervescent"].
+13. "alt": query bulunamazsa kullanılacak İKİNCİ somut sorgu. Aynı kurallar (İngilizce, 2-4 kelime, somut nesne+ortam), ama query'den FARKLI bir nesne veya açı olmalı. Hiçbir query/alt başka sahnedekiyle aynı olamaz.
+14. TEMA KİLİDİ: Konu doğa, hayvan, tarım, enerji veya seyahat DEĞİLSE; doğa, manzara, okyanus, deniz, plaj, orman, dağ, göl, nehir, gökyüzü, bulut, gün batımı, ateş, şömine, kar, sis, duman, rüzgar türbini, hayvan çağrıştıran HİÇBİR arama terimi kullanma. Konu ev/teknoloji/iş ise sadece o ortamın nesnelerini yaz (örn. "robot vacuum living room", "washing machine buttons", "phone screen hand", "wall socket plug").`;
 
 // ---- Kod seviyesinde zorlama (prompt'a güvenme) ----
 const SOYUT = new Set([
@@ -52,6 +54,14 @@ const COK_ANLAMLI = new Set([
   "plant", "bar", "court", "spring", "bat",
 ]);
 const ESTETIK = new Set(["cinematic", "realistic", "4k", "hd", "uhd", "8k", "1080p"]);
+const DOGA = new Set([
+  "nature", "landscape", "scenery", "ocean", "sea", "beach", "shore", "coast", "waves", "forest", "woods",
+  "tree", "trees", "mountain", "mountains", "hill", "hills", "valley", "lake", "river", "waterfall",
+  "sky", "clouds", "sunset", "sunrise", "fire", "fireplace", "flame", "flames", "snow", "fog", "mist",
+  "smoke", "wind", "turbine", "windmill", "wildlife", "animal", "animals", "bird", "birds", "fox", "deer",
+]);
+// Konu zaten bunlardan biriyle ilgiliyse doğa yasağı uygulanmaz.
+const DOGA_KONU = /doğa|orman|deniz|okyanus|dağ|hayvan|manzara|gökyüz|tarım|çiftlik|iklim|çevre|bitki|kuş|balık|seyahat|gezi|tatil|köy|enerji|rüzgar|güneş|yangın|ateş/i;
 
 // Biçim sapmalarını reddetme, düzelt: "Drone-view of farm!" -> "drone view of farm" (en fazla 4 kelime)
 const kelimeler = (v) =>
@@ -62,11 +72,15 @@ const kelimeler = (v) =>
     .split(/\s+/)
     .filter(Boolean);
 
-function queryYasakli(q) {
+function queryYasakli(q, dogaYasak = false) {
   const k = kelimeler(q);
   if (k.length < 2) return "en az 2 kelime olmalı";
   const soyut = k.filter((w) => SOYUT.has(w));
   if (soyut.length) return `soyut kelime: ${soyut.join(",")}`;
+  if (dogaYasak) {
+    const d = k.filter((w) => DOGA.has(w));
+    if (d.length) return `doğa/manzara kelimesi (tema kilidi): ${d.join(",")}`;
+  }
   if (k.length < 3) {
     const p = k.filter((w) => COK_ANLAMLI.has(w));
     if (p.length) return `çok anlamlı ve bağlamsız: ${p.join(",")}`;
@@ -78,18 +92,21 @@ function temizle(d) {
   if (!Array.isArray(d?.cumleler)) return d;
   for (const x of d.cumleler) {
     if (!x || typeof x !== "object") continue;
-    x.query = kelimeler(x.query)
-      .filter((w) => !ESTETIK.has(w)) // estetik eki render.py ekler; burada ASLA kalmasın
-      .slice(0, 4)
-      .join(" ");
+    for (const alan of ["query", "alt"]) {
+      x[alan] = kelimeler(x[alan])
+        .filter((w) => !ESTETIK.has(w)) // estetik eki render.py ekler; burada ASLA kalmasın
+        .slice(0, 4)
+        .join(" ");
+    }
     const ham = Array.isArray(x.avoid) ? x.avoid : typeof x.avoid === "string" ? [x.avoid] : [];
     x.avoid = [...new Set(ham.flatMap(kelimeler))].slice(0, 5);
   }
   return d;
 }
 
-function dogrula(d) {
+function dogrula(d, topic = "") {
   const err = [];
+  const dogaYasak = !DOGA_KONU.test(String(topic));
   if (!d || typeof d.baslik !== "string" || !d.baslik.trim()) err.push("baslik eksik");
   const c = Array.isArray(d?.cumleler) ? d.cumleler : [];
   if (c.length !== N_SCENES) err.push(`cumleler tam ${N_SCENES} eleman olmalı, ${c.length} geldi`);
@@ -98,21 +115,28 @@ function dogrula(d) {
     const q = typeof x?.query === "string" ? x.query.trim() : "";
     if (!m) err.push(`${i + 1}. metin boş`);
     if (/[()\[\]"“”#]|sahne\s*\d|kesit/i.test(m)) err.push(`${i + 1}. metinde yasak karakter/ifade var`);
+    const a = typeof x?.alt === "string" ? x.alt.trim() : "";
     if (!q) err.push(`${i + 1}. query boş`);
     else {
-      const yq = queryYasakli(q);
+      const yq = queryYasakli(q, dogaYasak);
       if (yq) err.push(`${i + 1}. query reddedildi (${yq}) query="${q}"`);
+    }
+    if (!a) err.push(`${i + 1}. alt boş`);
+    else {
+      const ya = queryYasakli(a, dogaYasak);
+      if (ya) err.push(`${i + 1}. alt reddedildi (${ya}) alt="${a}"`);
+      if (a === q) err.push(`${i + 1}. alt, query ile aynı`);
     }
     if (!Array.isArray(x?.avoid) || x.avoid.length < 1) err.push(`${i + 1}. avoid boş (query="${q}")`);
   });
-  const qs = c.map((x) => String(x?.query || "").trim()).filter(Boolean);
-  if (new Set(qs).size !== qs.length) err.push("tekrar eden query var, hepsi farklı olmalı");
+  const qs = c.flatMap((x) => [String(x?.query || "").trim(), String(x?.alt || "").trim()]).filter(Boolean);
+  if (new Set(qs).size !== qs.length) err.push("tekrar eden query/alt var, hepsi farklı olmalı");
   const wc = c.map((x) => String(x?.metin || "").trim().split(/\s+/).filter(Boolean).length);
   const toplam = wc.reduce((a, b) => a + b, 0);
   if (c.length && (toplam < 65 || toplam > 115)) err.push(`toplam ${toplam} kelime (80-100 olmalı)`);
   if (wc[0] > 10) err.push("ilk cümle 8 kelimeyi aşıyor");
-  if (/(değiştirecek|dönüştürecek|şekillendirecek|şekillenecek)/i.test(String(c[0]?.metin || "")))
-    err.push("kanca ansiklopedi kalıbında (değiştirecek/dönüştürecek)");
+  if (/(değiştirecek|dönüştürecek|şekillendirecek|şekillenecek|devrim|yeni çağ|çağı|geleceği|gelecek geldi|biliyor muydunuz)/i.test(String(c[0]?.metin || "")))
+    err.push("kanca klişe/ansiklopedi kalıbında (devrim/çağ/değiştirecek/dönüştürecek/biliyor muydunuz)");
   return err;
 }
 
@@ -149,7 +173,7 @@ async function senaryoUret(env, topic) {
   for (let deneme = 0; deneme < 2; deneme++) {
     try {
       const d = temizle(await groqTek(env, messages));
-      const err = dogrula(d);
+      const err = dogrula(d, topic);
       if (!err.length) return d;
       sonHata = err.slice(0, 8).join("; ");
       console.log("Doğrulama reddi:", sonHata);
@@ -165,7 +189,7 @@ async function senaryoUret(env, topic) {
 async function yeniSenaryo(env, chatId, topic) {
   try {
     const d = await senaryoUret(env, topic);
-    const scenes = d.cumleler.map((x) => ({ text: x.metin.trim(), query: x.query.trim(), avoid: x.avoid }));
+    const scenes = d.cumleler.map((x) => ({ text: x.metin.trim(), query: x.query.trim(), alt: x.alt.trim(), avoid: x.avoid }));
     const id = crypto.randomUUID().slice(0, 8);
     await env.KV.put(`s:${id}`, JSON.stringify({ baslik: d.baslik.trim(), scenes }), { expirationTtl: 3600 });
 
