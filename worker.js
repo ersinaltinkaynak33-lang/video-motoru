@@ -165,13 +165,13 @@ async function groqTek(env, messages) {
     }
     text = text.replace(/```json/gi, "").replace(/```/g, "").trim();
     return JSON.parse(text);
-  } finally {
-    clearTimeout(timeoutId);
   } catch (e) {
     if (e.name === "AbortError") {
       throw new Error(`Groq yanıtı ${GROQ_ATTEMPT_MS} saniyede alınamadı (zaman aşımı)`);
     }
     throw e;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
