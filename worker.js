@@ -141,20 +141,23 @@ function dogrula(d, topic = "") {
 }
 
 async function groqTek(env, messages) {
+  // DÜZELTME: Model adı llama-3.3-70b-versatile olarak değiştirildi, Groq'a özel olmayan parametreler silindi.
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${env.GROQ_API_KEY}` },
     body: JSON.stringify({
-      model: "openai/gpt-oss-120b",
+      model: "llama-3.3-70b-versatile",
       temperature: 0.7,
-      reasoning_effort: "low",
-      max_completion_tokens: 3000,
+      max_tokens: 3000,
       response_format: { type: "json_object" },
       messages,
     }),
     signal: AbortSignal.timeout(GROQ_ATTEMPT_MS),
   });
-  if (!res.ok) throw new Error(`Groq HTTP ${res.status}`);
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Groq HTTP ${res.status}: ${errorText.slice(0, 100)}`);
+  }
   const j = await res.json();
   if (j.error) throw new Error(j.error.message);
   let text = j.choices?.[0]?.message?.content;
