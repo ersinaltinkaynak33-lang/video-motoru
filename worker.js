@@ -49,3 +49,10 @@ async function groqTek(env, messages) {
     clearTimeout(timeoutId);
   }
 }
+
+// Minimal export to prevent syntax errors in Cloudflare Workers
+export default {
+  async fetch(request, env, ctx) {
+    return new Response("Bot Aktif");
+  }
+};
